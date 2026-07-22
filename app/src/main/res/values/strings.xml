@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SlotBot Lab</string>
+    <string name="accessibility_description">Test automation service for the SlotBot Lab mock screen.</string>
+</resources>
