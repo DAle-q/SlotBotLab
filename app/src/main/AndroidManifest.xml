@@ -19,7 +19,9 @@
         <activity
             android:name=".BotControlActivity"
             android:exported="true"
-            android:label="SlotBot Controls">
+            android:label="SlotBot Controls"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.example.slotbotlab.controls">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
