@@ -8,6 +8,8 @@ object BotRuntime {
     private const val KEY_INTERVAL_MS = "interval_ms"
     private const val KEY_DETECTIONS = "detections"
     private const val KEY_CLICK_ATTEMPTS = "click_attempts"
+    private const val KEY_BOOK_CLICKS = "book_clicks"
+    private const val KEY_CONFIRMATION_CLICKS = "confirmation_clicks"
 
     fun isRunning(context: Context): Boolean =
         prefs(context).getBoolean(KEY_RUNNING, false)
@@ -37,16 +39,34 @@ object BotRuntime {
         prefs(context).edit().putInt(KEY_CLICK_ATTEMPTS, current + count).apply()
     }
 
+    fun recordBookClick(context: Context) {
+        prefs(context).edit().putInt(KEY_BOOK_CLICKS, bookClicks(context) + 1).apply()
+    }
+
+    fun recordConfirmationClick(context: Context) {
+        prefs(context).edit()
+            .putInt(KEY_CONFIRMATION_CLICKS, confirmationClicks(context) + 1)
+            .apply()
+    }
+
     fun detections(context: Context): Int =
         prefs(context).getInt(KEY_DETECTIONS, 0)
 
     fun clickAttempts(context: Context): Int =
         prefs(context).getInt(KEY_CLICK_ATTEMPTS, 0)
 
+    fun bookClicks(context: Context): Int =
+        prefs(context).getInt(KEY_BOOK_CLICKS, 0)
+
+    fun confirmationClicks(context: Context): Int =
+        prefs(context).getInt(KEY_CONFIRMATION_CLICKS, 0)
+
     fun resetStats(context: Context) {
         prefs(context).edit()
             .putInt(KEY_DETECTIONS, 0)
             .putInt(KEY_CLICK_ATTEMPTS, 0)
+            .putInt(KEY_BOOK_CLICKS, 0)
+            .putInt(KEY_CONFIRMATION_CLICKS, 0)
             .apply()
     }
 
