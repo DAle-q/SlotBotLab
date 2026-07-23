@@ -21,11 +21,9 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 return
             }
 
-            performPullToRefresh {
-                // The UI refresh itself is asynchronous. Start scanning after it has had time
-                // to settle and retry several times because Compose can publish semantics a bit later.
-                handler.postDelayed({ scanForBookAndContinue(0) }, 900L)
-            }
+            // Always inspect the current UI before refreshing. This is important for the
+            // confirmation screen: "Book session" must be handled before any new swipe.
+            scanCurrentScreen(attempt = 0, refreshIfEmpty = true)
         }
     }
 
@@ -38,8 +36,8 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // The controlled loop drives the automation. Content-change events are intentionally
-        // ignored here so a single UI update cannot start several overlapping scan loops.
+        // The controlled state loop drives automation. Ignoring content-change callbacks here
+        // prevents overlapping loops when Compose publishes several semantics updates at once.
     }
 
     override fun onInterrupt() {
@@ -52,34 +50,76 @@ class SlotBotAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    private fun scanForBookAndContinue(attempt: Int) {
+    private fun scanCurrentScreen(
+        attempt: Int,
+        refreshIfEmpty: Boolean
+    ) {
         if (!BotRuntime.isRunning(this)) {
             handler.postDelayed(loop, 500L)
             return
         }
 
-        val bookNodes = findBookClickTargets()
-
-        if (bookNodes.isNotEmpty()) {
-            BotRuntime.recordDetection(this, bookNodes.size)
-
-            var clickAttempts = 0
-            bookNodes.forEach { node ->
-                if (clickNode(node)) {
-                    clickAttempts++
-                }
+        // Priority 1: finish an already-open confirmation screen.
+        val confirmationTargets = findExactClickTargets(CONFIRM_BOOK_TEXT)
+        if (confirmationTargets.isNotEmpty()) {
+            if (clickNode(confirmationTargets.first())) {
+                BotRuntime.recordClickAttempt(this, 1)
+                BotRuntime.recordConfirmationClick(this)
+                handler.postDelayed(
+                    { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                    POST_ACTION_SETTLE_MS
+                )
+            } else {
+                retryOrContinue(attempt, refreshIfEmpty)
             }
-
-            BotRuntime.recordClickAttempt(this, clickAttempts)
-            scheduleNextLoop()
             return
         }
 
+        // Priority 2: open confirmation for exactly one available session at a time.
+        val bookTargets = findExactClickTargets(BOOK_TEXT)
+        if (bookTargets.isNotEmpty()) {
+            BotRuntime.recordDetection(this, bookTargets.size)
+
+            if (clickNode(bookTargets.first())) {
+                BotRuntime.recordClickAttempt(this, 1)
+                BotRuntime.recordBookClick(this)
+                handler.postDelayed(
+                    { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                    POST_ACTION_SETTLE_MS
+                )
+            } else {
+                retryOrContinue(attempt, refreshIfEmpty)
+            }
+            return
+        }
+
+        retryOrContinue(attempt, refreshIfEmpty)
+    }
+
+    private fun retryOrContinue(
+        attempt: Int,
+        refreshIfEmpty: Boolean
+    ) {
         if (attempt < MAX_SCAN_RETRIES) {
             handler.postDelayed(
-                { scanForBookAndContinue(attempt + 1) },
+                {
+                    scanCurrentScreen(
+                        attempt = attempt + 1,
+                        refreshIfEmpty = refreshIfEmpty
+                    )
+                },
                 SCAN_RETRY_DELAY_MS
             )
+            return
+        }
+
+        if (refreshIfEmpty) {
+            performPullToRefresh {
+                handler.postDelayed(
+                    { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                    REFRESH_SETTLE_MS
+                )
+            }
         } else {
             scheduleNextLoop()
         }
@@ -95,8 +135,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val width = metrics.widthPixels.toFloat()
         val height = metrics.heightPixels.toFloat()
 
-        // The mock now closely matches the real screen, so the actual scrollable session area
-        // starts in the lower half of the display. Start the gesture inside that area.
+        // Start inside the scrollable session area, matching the real Available sessions screen.
         val x = width * 0.50f
         val startY = height * 0.60f
         val endY = height * 0.88f
@@ -135,7 +174,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun findBookClickTargets(): List<AccessibilityNodeInfo> {
+    private fun findExactClickTargets(exactLabel: String): List<AccessibilityNodeInfo> {
         val roots = buildList {
             rootInActiveWindow?.let(::add)
             windows
@@ -157,14 +196,8 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
                 val text = node.text?.toString()?.trim()
                 val description = node.contentDescription?.toString()?.trim()
-                val viewId = node.viewIdResourceName?.substringAfterLast('/')
 
-                val matchesBook =
-                    text == BOOK_TEXT ||
-                        description == BOOK_TEXT ||
-                        viewId?.startsWith("book_button") == true
-
-                if (!matchesBook) {
+                if (text != exactLabel && description != exactLabel) {
                     return@walkTree
                 }
 
@@ -228,8 +261,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return true
         }
 
-        // Fallback for apps whose accessibility tree exposes the label but refuses ACTION_CLICK.
-        // Tap the center of the detected node through the same AccessibilityService gesture API.
+        // Fallback for UIs that expose the label but refuse ACTION_CLICK.
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         if (bounds.isEmpty) return false
@@ -253,7 +285,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val BOOK_TEXT = "Book"
+        private const val CONFIRM_BOOK_TEXT = "Book session"
         private const val MAX_SCAN_RETRIES = 6
         private const val SCAN_RETRY_DELAY_MS = 350L
+        private const val POST_ACTION_SETTLE_MS = 500L
+        private const val REFRESH_SETTLE_MS = 900L
     }
 }
