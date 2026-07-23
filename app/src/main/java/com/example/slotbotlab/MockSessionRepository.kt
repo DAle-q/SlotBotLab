@@ -77,11 +77,13 @@ object MockSessionRepository {
         val session = sessions.firstOrNull { it.id == id } ?: return
         if (session.booked || pendingSessionId != null) return
 
+        val context = applicationContext ?: return
+
         pendingSessionId = id
         lastEvent = "Waiting for confirmation for session #$id"
 
-        applicationContext?.startActivity(
-            Intent(applicationContext, BookingConfirmationActivity::class.java)
+        context.startActivity(
+            Intent(context, BookingConfirmationActivity::class.java)
                 .putExtra(BookingConfirmationActivity.EXTRA_SESSION_ID, id)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         )
