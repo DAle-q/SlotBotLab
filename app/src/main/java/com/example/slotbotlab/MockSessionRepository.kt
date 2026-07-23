@@ -1,5 +1,7 @@
 package com.example.slotbotlab
 
+import android.content.Context
+import android.content.Intent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -24,10 +26,18 @@ object MockSessionRepository {
     var bookedCount by mutableIntStateOf(0)
         private set
 
+    var pendingSessionId by mutableStateOf<Int?>(null)
+        private set
+
     var lastEvent by mutableStateOf("Waiting for the first refresh")
         private set
 
     private var nextId = 1
+    private var applicationContext: Context? = null
+
+    fun attachApplication(context: Context) {
+        applicationContext = context.applicationContext
+    }
 
     fun onRefresh() {
         refreshCount++
@@ -59,19 +69,51 @@ object MockSessionRepository {
         lastEvent = "Test session #$id created"
     }
 
+    /**
+     * First booking step. The existing mock UI already calls book(id) when its Book button is
+     * pressed, so this method now opens the confirmation screen instead of booking immediately.
+     */
     fun book(id: Int) {
+        val session = sessions.firstOrNull { it.id == id } ?: return
+        if (session.booked || pendingSessionId != null) return
+
+        pendingSessionId = id
+        lastEvent = "Waiting for confirmation for session #$id"
+
+        applicationContext?.startActivity(
+            Intent(applicationContext, BookingConfirmationActivity::class.java)
+                .putExtra(BookingConfirmationActivity.EXTRA_SESSION_ID, id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+    }
+
+    fun sessionById(id: Int): MockSession? = sessions.firstOrNull { it.id == id }
+
+    fun confirmBooking(id: Int) {
         val index = sessions.indexOfFirst { it.id == id }
-        if (index == -1 || sessions[index].booked) return
+        if (index == -1 || sessions[index].booked) {
+            pendingSessionId = null
+            return
+        }
 
         sessions[index] = sessions[index].copy(booked = true)
         bookedCount++
+        pendingSessionId = null
         lastEvent = "Session #$id booked"
+    }
+
+    fun cancelBooking(id: Int) {
+        if (pendingSessionId == id) {
+            pendingSessionId = null
+            lastEvent = "Booking confirmation cancelled for session #$id"
+        }
     }
 
     fun clear() {
         sessions.clear()
         refreshCount = 0
         bookedCount = 0
+        pendingSessionId = null
         nextId = 1
         lastEvent = "Test state cleared"
     }
