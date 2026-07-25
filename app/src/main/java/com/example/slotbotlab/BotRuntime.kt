@@ -1,6 +1,13 @@
 package com.example.slotbotlab
 
 import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+
+data class CatchLogEntry(
+    val caughtAtMillis: Long,
+    val slotName: String
+)
 
 object BotRuntime {
     private const val PREFS = "slot_bot_runtime"
@@ -11,12 +18,21 @@ object BotRuntime {
     private const val KEY_BOOK_CLICKS = "book_clicks"
     private const val KEY_CONFIRMATION_CLICKS = "confirmation_clicks"
     private const val KEY_OVERLAY_VISIBLE = "overlay_visible"
+    private const val KEY_NEXT_REFRESH_AT = "next_refresh_at"
+    private const val KEY_CATCH_LOGS = "catch_logs"
+    private const val MAX_CATCH_LOGS = 50
 
     fun isRunning(context: Context): Boolean =
         prefs(context).getBoolean(KEY_RUNNING, false)
 
     fun setRunning(context: Context, running: Boolean) {
-        prefs(context).edit().putBoolean(KEY_RUNNING, running).apply()
+        prefs(context).edit()
+            .putBoolean(KEY_RUNNING, running)
+            .apply()
+
+        if (!running) {
+            setNextRefreshAt(context, 0L)
+        }
     }
 
     fun intervalMs(context: Context): Long =
@@ -62,6 +78,59 @@ object BotRuntime {
 
     fun setOverlayVisible(context: Context, visible: Boolean) {
         prefs(context).edit().putBoolean(KEY_OVERLAY_VISIBLE, visible).apply()
+    }
+
+    fun nextRefreshAt(context: Context): Long =
+        prefs(context).getLong(KEY_NEXT_REFRESH_AT, 0L)
+
+    fun setNextRefreshAt(context: Context, epochMillis: Long) {
+        prefs(context).edit().putLong(KEY_NEXT_REFRESH_AT, epochMillis).apply()
+    }
+
+    @Synchronized
+    fun recordCatch(
+        context: Context,
+        slotName: String,
+        caughtAtMillis: Long = System.currentTimeMillis()
+    ) {
+        val updated = buildList {
+            add(CatchLogEntry(caughtAtMillis, slotName.ifBlank { "Unknown session" }))
+            addAll(catchLogs(context))
+        }.take(MAX_CATCH_LOGS)
+
+        val json = JSONArray()
+        updated.forEach { entry ->
+            json.put(
+                JSONObject()
+                    .put("caughtAtMillis", entry.caughtAtMillis)
+                    .put("slotName", entry.slotName)
+            )
+        }
+
+        prefs(context).edit().putString(KEY_CATCH_LOGS, json.toString()).apply()
+    }
+
+    fun catchLogs(context: Context): List<CatchLogEntry> {
+        val raw = prefs(context).getString(KEY_CATCH_LOGS, null) ?: return emptyList()
+
+        return runCatching {
+            val json = JSONArray(raw)
+            buildList {
+                for (index in 0 until json.length()) {
+                    val item = json.optJSONObject(index) ?: continue
+                    add(
+                        CatchLogEntry(
+                            caughtAtMillis = item.optLong("caughtAtMillis"),
+                            slotName = item.optString("slotName", "Unknown session")
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun clearCatchLogs(context: Context) {
+        prefs(context).edit().remove(KEY_CATCH_LOGS).apply()
     }
 
     fun resetStats(context: Context) {
