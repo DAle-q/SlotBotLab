@@ -17,10 +17,12 @@ object BotRuntime {
     private const val KEY_CLICK_ATTEMPTS = "click_attempts"
     private const val KEY_BOOK_CLICKS = "book_clicks"
     private const val KEY_CONFIRMATION_CLICKS = "confirmation_clicks"
+    private const val KEY_REFRESH_ATTEMPTS = "refresh_attempts"
     private const val KEY_OVERLAY_VISIBLE = "overlay_visible"
     private const val KEY_NEXT_REFRESH_AT = "next_refresh_at"
     private const val KEY_CATCH_LOGS = "catch_logs"
     private const val MAX_CATCH_LOGS = 50
+    private const val DUPLICATE_CATCH_WINDOW_MS = 30_000L
 
     fun isRunning(context: Context): Boolean =
         prefs(context).getBoolean(KEY_RUNNING, false)
@@ -64,6 +66,12 @@ object BotRuntime {
             .apply()
     }
 
+    fun recordRefreshAttempt(context: Context) {
+        prefs(context).edit()
+            .putInt(KEY_REFRESH_ATTEMPTS, refreshAttempts(context) + 1)
+            .apply()
+    }
+
     fun detections(context: Context): Int = prefs(context).getInt(KEY_DETECTIONS, 0)
 
     fun clickAttempts(context: Context): Int = prefs(context).getInt(KEY_CLICK_ATTEMPTS, 0)
@@ -72,6 +80,9 @@ object BotRuntime {
 
     fun confirmationClicks(context: Context): Int =
         prefs(context).getInt(KEY_CONFIRMATION_CLICKS, 0)
+
+    fun refreshAttempts(context: Context): Int =
+        prefs(context).getInt(KEY_REFRESH_ATTEMPTS, 0)
 
     fun isOverlayVisible(context: Context): Boolean =
         prefs(context).getBoolean(KEY_OVERLAY_VISIBLE, false)
@@ -93,9 +104,21 @@ object BotRuntime {
         slotName: String,
         caughtAtMillis: Long = System.currentTimeMillis()
     ) {
+        val normalizedSlotName = slotName.ifBlank { "Unknown session" }
+        val existing = catchLogs(context)
+        val newest = existing.firstOrNull()
+
+        if (
+            newest != null &&
+            newest.slotName == normalizedSlotName &&
+            caughtAtMillis - newest.caughtAtMillis < DUPLICATE_CATCH_WINDOW_MS
+        ) {
+            return
+        }
+
         val updated = buildList {
-            add(CatchLogEntry(caughtAtMillis, slotName.ifBlank { "Unknown session" }))
-            addAll(catchLogs(context))
+            add(CatchLogEntry(caughtAtMillis, normalizedSlotName))
+            addAll(existing)
         }.take(MAX_CATCH_LOGS)
 
         val json = JSONArray()
@@ -139,6 +162,7 @@ object BotRuntime {
             .putInt(KEY_CLICK_ATTEMPTS, 0)
             .putInt(KEY_BOOK_CLICKS, 0)
             .putInt(KEY_CONFIRMATION_CLICKS, 0)
+            .putInt(KEY_REFRESH_ATTEMPTS, 0)
             .apply()
     }
 
