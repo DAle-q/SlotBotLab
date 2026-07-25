@@ -40,7 +40,6 @@ class FloatingBotControlService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-
         setActiveState(false)
 
         if (!Settings.canDrawOverlays(this)) {
@@ -50,15 +49,12 @@ class FloatingBotControlService : Service() {
 
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
-
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
         val shown = runCatching {
             showOverlay()
             true
-        }.getOrElse {
-            false
-        }
+        }.getOrElse { false }
 
         if (!shown) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -76,7 +72,6 @@ class FloatingBotControlService : Service() {
                 .onSuccess { setActiveState(true) }
                 .onFailure { stopSelf() }
         }
-
         return START_STICKY
     }
 
@@ -100,8 +95,7 @@ class FloatingBotControlService : Service() {
     private fun showOverlay() {
         if (overlayView != null) return
 
-        val manager = windowManager
-            ?: error("WindowManager is not initialized")
+        val manager = windowManager ?: error("WindowManager is not initialized")
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -130,10 +124,14 @@ class FloatingBotControlService : Service() {
             setTextColor(Color.WHITE)
             background = roundedBackground(Color.rgb(0, 140, 115), 22f)
             setOnClickListener {
-                BotRuntime.setRunning(
-                    this@FloatingBotControlService,
-                    !BotRuntime.isRunning(this@FloatingBotControlService)
-                )
+                val nextRunning = !BotRuntime.isRunning(this@FloatingBotControlService)
+                BotRuntime.setRunning(this@FloatingBotControlService, nextRunning)
+
+                if (nextRunning) {
+                    BotRuntime.requestImmediateRefresh(this@FloatingBotControlService)
+                    SlotBotAccessibilityService.wakeForManualRefresh()
+                }
+
                 updateToggleButton()
             }
         }
@@ -153,6 +151,7 @@ class FloatingBotControlService : Service() {
             setOnClickListener {
                 BotRuntime.setRunning(this@FloatingBotControlService, true)
                 BotRuntime.requestImmediateRefresh(this@FloatingBotControlService)
+                SlotBotAccessibilityService.wakeForManualRefresh()
                 updateToggleButton()
             }
         }
@@ -183,9 +182,7 @@ class FloatingBotControlService : Service() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 dp(44)
-            ).apply {
-                marginEnd = dp(6)
-            }
+            ).apply { marginEnd = dp(6) }
         )
         container.addView(
             refresh,
@@ -212,7 +209,6 @@ class FloatingBotControlService : Service() {
         }
 
         dragHandle.setOnTouchListener(DragTouchListener(params))
-
         manager.addView(container, params)
         overlayView = container
         updateToggleButton()
