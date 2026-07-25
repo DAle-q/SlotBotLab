@@ -23,6 +23,16 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 return
             }
 
+            val nextRefreshAt = BotRuntime.nextRefreshAt(this@SlotBotAccessibilityService)
+            val now = System.currentTimeMillis()
+            if (nextRefreshAt > now) {
+                handler.postDelayed(
+                    this,
+                    minOf(SCHEDULE_HEARTBEAT_MS, nextRefreshAt - now)
+                )
+                return
+            }
+
             if (supportedRoots().isEmpty()) {
                 BotRuntime.setNextRefreshAt(this@SlotBotAccessibilityService, 0L)
                 handler.postDelayed(this, OUTSIDE_SUPPORTED_APP_RECHECK_MS)
@@ -169,7 +179,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         )
 
         BotRuntime.setNextRefreshAt(this, System.currentTimeMillis() + delayMs)
-        handler.postDelayed(loop, delayMs)
+        handler.postDelayed(loop, SCHEDULE_HEARTBEAT_MS)
     }
 
     private fun performPullToRefresh(onFinished: () -> Unit) {
@@ -201,6 +211,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             gesture,
             object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
+                    BotRuntime.recordRefreshAttempt(this@SlotBotAccessibilityService)
                     onFinished()
                 }
 
@@ -394,6 +405,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         private const val CONFIRM_BOOK_TEXT = "Book session"
 
         private const val STOPPED_RECHECK_MS = 500L
+        private const val SCHEDULE_HEARTBEAT_MS = 500L
         private const val OUTSIDE_SUPPORTED_APP_RECHECK_MS = 1_000L
         private const val OUTSIDE_SESSIONS_SCREEN_RECHECK_MS = 2_000L
 
@@ -415,6 +427,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             "Available sessions",
             "AVAILABLE SESSIONS",
             "Applied filters:",
+            "Applied filters",
             "No sessions matching your filter"
         )
 
