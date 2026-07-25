@@ -139,6 +139,24 @@ class FloatingBotControlService : Service() {
         }
         toggleButton = toggle
 
+        val refresh = Button(this).apply {
+            text = "↻"
+            isAllCaps = false
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(11), dp(7), dp(11), dp(7))
+            textSize = 19f
+            setTextColor(Color.WHITE)
+            background = roundedBackground(Color.rgb(70, 91, 120), 22f)
+            setOnClickListener {
+                BotRuntime.setRunning(this@FloatingBotControlService, true)
+                BotRuntime.requestImmediateRefresh(this@FloatingBotControlService)
+                updateToggleButton()
+            }
+        }
+
         val close = Button(this).apply {
             text = "×"
             isAllCaps = false
@@ -166,6 +184,12 @@ class FloatingBotControlService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 dp(44)
             ).apply {
+                marginEnd = dp(6)
+            }
+        )
+        container.addView(
+            refresh,
+            LinearLayout.LayoutParams(dp(48), dp(44)).apply {
                 marginEnd = dp(6)
             }
         )
@@ -246,7 +270,7 @@ class FloatingBotControlService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
         .setContentTitle("SlotBot floating controls")
-        .setContentText("Floating Start/Pause controls are visible")
+        .setContentText("Start, pause, refresh, or close SlotBot")
         .setOngoing(true)
         .setPriority(NotificationCompat.PRIORITY_LOW)
         .setContentIntent(
