@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -41,6 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val ControlBackground = Color(0xFF101214)
 private val ControlCard = Color(0xFF1C2024)
@@ -69,6 +74,11 @@ private fun BotControlScreen() {
     var overlayVisible by remember { mutableStateOf(BotRuntime.isOverlayVisible(context)) }
     var detections by remember { mutableIntStateOf(BotRuntime.detections(context)) }
     var clickAttempts by remember { mutableIntStateOf(BotRuntime.clickAttempts(context)) }
+    var bookClicks by remember { mutableIntStateOf(BotRuntime.bookClicks(context)) }
+    var confirmationClicks by remember { mutableIntStateOf(BotRuntime.confirmationClicks(context)) }
+    var nextRefreshAt by remember { mutableStateOf(BotRuntime.nextRefreshAt(context)) }
+    var catchLogs by remember { mutableStateOf(BotRuntime.catchLogs(context)) }
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -78,8 +88,21 @@ private fun BotControlScreen() {
             overlayVisible = BotRuntime.isOverlayVisible(context)
             detections = BotRuntime.detections(context)
             clickAttempts = BotRuntime.clickAttempts(context)
+            bookClicks = BotRuntime.bookClicks(context)
+            confirmationClicks = BotRuntime.confirmationClicks(context)
+            nextRefreshAt = BotRuntime.nextRefreshAt(context)
+            catchLogs = BotRuntime.catchLogs(context)
+            nowMillis = System.currentTimeMillis()
             delay(350L)
         }
+    }
+
+    val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val nextRefreshText = when {
+        !running -> "PAUSED"
+        nextRefreshAt <= 0L -> "SCANNING / WAITING FOR GLOVO"
+        nextRefreshAt <= nowMillis -> "NOW"
+        else -> timeFormatter.format(Date(nextRefreshAt))
     }
 
     Box(
@@ -90,6 +113,7 @@ private fun BotControlScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(22.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -103,7 +127,7 @@ private fun BotControlScreen() {
             )
 
             Text(
-                text = "Automation test console",
+                text = "Glovo test mode - random refresh every 1 to 10 minutes",
                 fontSize = 16.sp,
                 color = ControlMuted
             )
@@ -130,6 +154,12 @@ private fun BotControlScreen() {
                 healthy = running
             )
 
+            StatusCard(
+                title = "Next refresh",
+                value = nextRefreshText,
+                healthy = running
+            )
+
             Card(
                 colors = CardDefaults.cardColors(containerColor = ControlCard),
                 shape = RoundedCornerShape(18.dp),
@@ -140,10 +170,12 @@ private fun BotControlScreen() {
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("LIVE STATS", color = ControlMuted, fontWeight = FontWeight.Bold)
-                    Text("Detected Book buttons: $detections", color = Color.White, fontSize = 18.sp)
-                    Text("Successful clicks: $clickAttempts", color = Color.White, fontSize = 18.sp)
-                    Text("Refreshes: ${MockSessionRepository.refreshCount}", color = Color.White, fontSize = 18.sp)
-                    Text("Booked sessions: ${MockSessionRepository.bookedCount}", color = Color.White, fontSize = 18.sp)
+                    Text("Detected Book buttons: $detections", color = Color.White, fontSize = 17.sp)
+                    Text("Book clicks: $bookClicks", color = Color.White, fontSize = 17.sp)
+                    Text("Book session clicks: $confirmationClicks", color = Color.White, fontSize = 17.sp)
+                    Text("All successful clicks: $clickAttempts", color = Color.White, fontSize = 17.sp)
+                    Text("Refresh range: 01:00-10:00", color = Color.White, fontSize = 17.sp)
+                    Text("Expected average: about 10.9 refreshes/hour", color = ControlMuted, fontSize = 15.sp)
                 }
             }
 
@@ -175,15 +207,11 @@ private fun BotControlScreen() {
                     } else {
                         BotRuntime.setRunning(context, true)
                         running = true
-                        context.startActivity(
-                            Intent(context, MainActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        )
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(if (accessibilityEnabled) "START BOT AND OPEN TEST SCREEN" else "ENABLE ACCESSIBILITY FIRST")
+                Text(if (accessibilityEnabled) "START BOT" else "ENABLE ACCESSIBILITY FIRST")
             }
 
             if (running) {
@@ -194,7 +222,7 @@ private fun BotControlScreen() {
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("STOP BOT")
+                    Text("PAUSE BOT")
                 }
             }
 
@@ -203,17 +231,22 @@ private fun BotControlScreen() {
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 OutlinedButton(
-                    onClick = { MockSessionRepository.createSession() },
+                    onClick = { openGlovoRider(context) },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("CREATE SLOT")
+                    Text("OPEN GLOVO")
                 }
 
                 OutlinedButton(
-                    onClick = { MockSessionRepository.clear() },
+                    onClick = {
+                        context.startActivity(
+                            Intent(context, MainActivity::class.java)
+                                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        )
+                    },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("CLEAR DATA")
+                    Text("TEST SCREEN")
                 }
             }
 
@@ -224,16 +257,55 @@ private fun BotControlScreen() {
                 Text("OPEN ACCESSIBILITY SETTINGS")
             }
 
+            Card(
+                colors = CardDefaults.cardColors(containerColor = ControlCard),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("CATCH LOG", color = ControlMuted, fontWeight = FontWeight.Bold)
+
+                    if (catchLogs.isEmpty()) {
+                        Text("No sessions caught yet", color = Color.White, fontSize = 16.sp)
+                    } else {
+                        catchLogs.take(10).forEach { entry ->
+                            Text(
+                                text = "${timeFormatter.format(Date(entry.caughtAtMillis))}  ${entry.slotName}",
+                                color = Color.White,
+                                fontSize = 16.sp
+                            )
+                        }
+                    }
+
+                    TextButton(
+                        onClick = {
+                            BotRuntime.clearCatchLogs(context)
+                            catchLogs = emptyList()
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("CLEAR CATCH LOG")
+                    }
+                }
+            }
+
             TextButton(
                 onClick = {
                     BotRuntime.resetStats(context)
                     detections = 0
                     clickAttempts = 0
+                    bookClicks = 0
+                    confirmationClicks = 0
                 },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
                 Text("RESET STATS")
             }
+
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
@@ -261,7 +333,7 @@ private fun StatusCard(
                 text = value,
                 color = if (healthy) ControlGreen else Color(0xFFFF6B6B),
                 fontWeight = FontWeight.Bold,
-                fontSize = 17.sp
+                fontSize = 15.sp
             )
         }
     }
@@ -273,6 +345,17 @@ private fun openOverlayPermission(context: Context) {
         Uri.parse("package:${context.packageName}")
     )
     context.startActivity(intent)
+}
+
+private fun openGlovoRider(context: Context) {
+    val launchIntent = listOf(
+        "com.logistics.rider.glovo",
+        "com.glovoapp.courier"
+    ).firstNotNullOfOrNull { packageName ->
+        context.packageManager.getLaunchIntentForPackage(packageName)
+    }
+
+    launchIntent?.let(context::startActivity)
 }
 
 private fun isAccessibilityServiceEnabled(context: Context): Boolean {
