@@ -3,6 +3,7 @@ package com.example.slotbotlab
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -64,6 +65,8 @@ private fun BotControlScreen() {
 
     var running by remember { mutableStateOf(BotRuntime.isRunning(context)) }
     var accessibilityEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
+    var overlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var overlayVisible by remember { mutableStateOf(BotRuntime.isOverlayVisible(context)) }
     var detections by remember { mutableIntStateOf(BotRuntime.detections(context)) }
     var clickAttempts by remember { mutableIntStateOf(BotRuntime.clickAttempts(context)) }
 
@@ -71,6 +74,8 @@ private fun BotControlScreen() {
         while (true) {
             running = BotRuntime.isRunning(context)
             accessibilityEnabled = isAccessibilityServiceEnabled(context)
+            overlayPermission = Settings.canDrawOverlays(context)
+            overlayVisible = BotRuntime.isOverlayVisible(context)
             detections = BotRuntime.detections(context)
             clickAttempts = BotRuntime.clickAttempts(context)
             delay(350L)
@@ -86,7 +91,7 @@ private fun BotControlScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(22.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Spacer(Modifier.height(8.dp))
 
@@ -110,6 +115,16 @@ private fun BotControlScreen() {
             )
 
             StatusCard(
+                title = "Floating controls",
+                value = when {
+                    !overlayPermission -> "NO PERMISSION"
+                    overlayVisible -> "VISIBLE"
+                    else -> "HIDDEN"
+                },
+                healthy = overlayPermission && overlayVisible
+            )
+
+            StatusCard(
                 title = "Bot engine",
                 value = if (running) "RUNNING" else "STOPPED",
                 healthy = running
@@ -130,6 +145,27 @@ private fun BotControlScreen() {
                     Text("Refreshes: ${MockSessionRepository.refreshCount}", color = Color.White, fontSize = 18.sp)
                     Text("Booked sessions: ${MockSessionRepository.bookedCount}", color = Color.White, fontSize = 18.sp)
                 }
+            }
+
+            Button(
+                onClick = {
+                    when {
+                        !overlayPermission -> openOverlayPermission(context)
+                        !overlayVisible -> context.startForegroundService(
+                            Intent(context, FloatingBotControlService::class.java)
+                        )
+                        else -> Unit
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    when {
+                        !overlayPermission -> "ALLOW DISPLAY OVER OTHER APPS"
+                        overlayVisible -> "FLOATING CONTROLS ARE VISIBLE"
+                        else -> "SHOW FLOATING CONTROLS"
+                    }
+                )
             }
 
             Button(
@@ -229,6 +265,14 @@ private fun StatusCard(
             )
         }
     }
+}
+
+private fun openOverlayPermission(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        Uri.parse("package:${context.packageName}")
+    )
+    context.startActivity(intent)
 }
 
 private fun isAccessibilityServiceEnabled(context: Context): Boolean {
