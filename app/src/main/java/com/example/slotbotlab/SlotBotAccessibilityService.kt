@@ -292,30 +292,64 @@ class SlotBotAccessibilityService : AccessibilityService() {
         usable.top = usable.top.coerceAtLeast((screenHeight * 0.18f).toInt())
         usable.bottom = usable.bottom.coerceAtMost(safeBottom)
 
+        fun randomOffset(maxOffsetPx: Int): Float =
+            Random.nextInt(-maxOffsetPx, maxOffsetPx + 1).toFloat()
+
         val listAnchorBottom = findSessionListAnchorBottom(roots)
-        val x = usable.centerX().toFloat()
 
-        var startY = when {
-            listAnchorBottom != null -> maxOf(
-                listAnchorBottom + dp(42),
-                (screenHeight * 0.52f).toInt()
-            ).toFloat()
-            else -> (usable.top + usable.height() * 0.56f)
-        }
+        val horizontalPadding = dp(18).toFloat()
 
-        var endY = minOf(
-            startY + dp(245),
-            usable.bottom - dp(18).toFloat(),
-            safeBottom.toFloat()
-        )
+        val topLimit = usable.top + dp(18).toFloat()
 
-        if (endY - startY < dp(120)) {
-            startY = (screenHeight * 0.55f)
-            endY = minOf(
-                screenHeight * 0.82f,
-                safeBottom.toFloat()
+        val bottomLimit = minOf(
+            usable.bottom - dp(18),
+            safeBottom
+        ).toFloat()
+
+        val usableHeight = (bottomLimit - topLimit).coerceAtLeast(0f)
+
+// Horizontal randomness: ±150px
+        val x = (
+                usable.centerX().toFloat() +
+                        randomOffset(150)
+                ).coerceIn(
+                usable.left + horizontalPadding,
+                usable.right - horizontalPadding
             )
-        }
+
+// Start immediately after the middle of the screen
+        val desiredStartY =
+            topLimit + usableHeight * 0.51f
+
+        val startRandomness =
+            (usableHeight * 0.01f).toInt()
+
+        val startY = (
+                desiredStartY +
+                        randomOffset(startRandomness)
+                ).coerceIn(
+                topLimit + usableHeight * 0.50f,
+                bottomLimit - usableHeight * 0.42f
+            )
+
+// Previously 25%, now approximately 50%
+        val baseSwipeDistance =
+            usableHeight * 0.50f
+
+        val swipeRandomness =
+            (usableHeight * 0.02f).toInt()
+
+        val swipeDistance = (
+                baseSwipeDistance +
+                        randomOffset(swipeRandomness)
+                ).coerceAtLeast(
+                usableHeight * 0.42f
+            )
+
+// Top-to-bottom swipe
+        val endY = (
+                startY + swipeDistance
+                ).coerceAtMost(bottomLimit)
 
         val targetPackage = roots
             .mapNotNull { it.packageName?.toString() }
