@@ -10,6 +10,7 @@ object BotRuntime {
     private const val KEY_CLICK_ATTEMPTS = "click_attempts"
     private const val KEY_BOOK_CLICKS = "book_clicks"
     private const val KEY_CONFIRMATION_CLICKS = "confirmation_clicks"
+    private const val KEY_OVERLAY_VISIBLE = "overlay_visible"
 
     fun isRunning(context: Context): Boolean =
         prefs(context).getBoolean(KEY_RUNNING, false)
@@ -29,14 +30,12 @@ object BotRuntime {
 
     fun recordDetection(context: Context, count: Int) {
         if (count <= 0) return
-        val current = detections(context)
-        prefs(context).edit().putInt(KEY_DETECTIONS, current + count).apply()
+        prefs(context).edit().putInt(KEY_DETECTIONS, detections(context) + count).apply()
     }
 
     fun recordClickAttempt(context: Context, count: Int) {
         if (count <= 0) return
-        val current = clickAttempts(context)
-        prefs(context).edit().putInt(KEY_CLICK_ATTEMPTS, current + count).apply()
+        prefs(context).edit().putInt(KEY_CLICK_ATTEMPTS, clickAttempts(context) + count).apply()
     }
 
     fun recordBookClick(context: Context) {
@@ -49,17 +48,21 @@ object BotRuntime {
             .apply()
     }
 
-    fun detections(context: Context): Int =
-        prefs(context).getInt(KEY_DETECTIONS, 0)
+    fun detections(context: Context): Int = prefs(context).getInt(KEY_DETECTIONS, 0)
 
-    fun clickAttempts(context: Context): Int =
-        prefs(context).getInt(KEY_CLICK_ATTEMPTS, 0)
+    fun clickAttempts(context: Context): Int = prefs(context).getInt(KEY_CLICK_ATTEMPTS, 0)
 
-    fun bookClicks(context: Context): Int =
-        prefs(context).getInt(KEY_BOOK_CLICKS, 0)
+    fun bookClicks(context: Context): Int = prefs(context).getInt(KEY_BOOK_CLICKS, 0)
 
     fun confirmationClicks(context: Context): Int =
         prefs(context).getInt(KEY_CONFIRMATION_CLICKS, 0)
+
+    fun isOverlayVisible(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_OVERLAY_VISIBLE, false)
+
+    fun setOverlayVisible(context: Context, visible: Boolean) {
+        prefs(context).edit().putBoolean(KEY_OVERLAY_VISIBLE, visible).apply()
+    }
 
     fun resetStats(context: Context) {
         prefs(context).edit()
