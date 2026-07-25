@@ -41,7 +41,7 @@ class FloatingBotControlService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        isActive = false
+        setActiveState(false)
 
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
@@ -66,14 +66,14 @@ class FloatingBotControlService : Service() {
             return
         }
 
-        isActive = true
+        setActiveState(true)
         handler.post(refreshUi)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (overlayView == null && Settings.canDrawOverlays(this)) {
             runCatching { showOverlay() }
-                .onSuccess { isActive = true }
+                .onSuccess { setActiveState(true) }
                 .onFailure { stopSelf() }
         }
 
@@ -93,7 +93,7 @@ class FloatingBotControlService : Service() {
 
         overlayView = null
         toggleButton = null
-        isActive = false
+        setActiveState(false)
         super.onDestroy()
     }
 
@@ -192,6 +192,11 @@ class FloatingBotControlService : Service() {
         manager.addView(container, params)
         overlayView = container
         updateToggleButton()
+    }
+
+    private fun setActiveState(active: Boolean) {
+        isActive = active
+        BotRuntime.setOverlayVisible(this, active)
     }
 
     private fun updateToggleButton() {
