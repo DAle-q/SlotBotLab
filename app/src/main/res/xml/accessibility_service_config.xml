@@ -7,4 +7,4 @@
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_description"
     android:notificationTimeout="100"
-    android:packageNames="com.example.slotbotlab,com.logistics.rider.glovo,com.glovoapp.courier" />
+    android:packageNames="com.example.slotbotlab,com.logistics.rider.glovo,com.glovoapp.courier,com.glovoapp.rider" />
