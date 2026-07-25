@@ -76,6 +76,7 @@ private fun BotControlScreen() {
     var clickAttempts by remember { mutableIntStateOf(BotRuntime.clickAttempts(context)) }
     var bookClicks by remember { mutableIntStateOf(BotRuntime.bookClicks(context)) }
     var confirmationClicks by remember { mutableIntStateOf(BotRuntime.confirmationClicks(context)) }
+    var refreshAttempts by remember { mutableIntStateOf(BotRuntime.refreshAttempts(context)) }
     var nextRefreshAt by remember { mutableStateOf(BotRuntime.nextRefreshAt(context)) }
     var catchLogs by remember { mutableStateOf(BotRuntime.catchLogs(context)) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -90,6 +91,7 @@ private fun BotControlScreen() {
             clickAttempts = BotRuntime.clickAttempts(context)
             bookClicks = BotRuntime.bookClicks(context)
             confirmationClicks = BotRuntime.confirmationClicks(context)
+            refreshAttempts = BotRuntime.refreshAttempts(context)
             nextRefreshAt = BotRuntime.nextRefreshAt(context)
             catchLogs = BotRuntime.catchLogs(context)
             nowMillis = System.currentTimeMillis()
@@ -170,6 +172,7 @@ private fun BotControlScreen() {
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("LIVE STATS", color = ControlMuted, fontWeight = FontWeight.Bold)
+                    Text("Refreshes: $refreshAttempts", color = Color.White, fontSize = 17.sp)
                     Text("Detected Book buttons: $detections", color = Color.White, fontSize = 17.sp)
                     Text("Book clicks: $bookClicks", color = Color.White, fontSize = 17.sp)
                     Text("Book session clicks: $confirmationClicks", color = Color.White, fontSize = 17.sp)
@@ -299,6 +302,7 @@ private fun BotControlScreen() {
                     clickAttempts = 0
                     bookClicks = 0
                     confirmationClicks = 0
+                    refreshAttempts = 0
                 },
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
@@ -355,7 +359,7 @@ private fun openGlovoRider(context: Context) {
         context.packageManager.getLaunchIntentForPackage(packageName)
     }
 
-    launchIntent?.let(context::startActivity)
+    launchIntent?.let { context.startActivity(it) }
 }
 
 private fun isAccessibilityServiceEnabled(context: Context): Boolean {
