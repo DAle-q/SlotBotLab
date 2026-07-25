@@ -79,6 +79,9 @@ private fun BotControlScreen() {
     var refreshAttempts by remember { mutableIntStateOf(BotRuntime.refreshAttempts(context)) }
     var nextRefreshAt by remember { mutableStateOf(BotRuntime.nextRefreshAt(context)) }
     var catchLogs by remember { mutableStateOf(BotRuntime.catchLogs(context)) }
+    var activePackage by remember { mutableStateOf(BotRuntime.activePackage(context)) }
+    var lastStatus by remember { mutableStateOf(BotRuntime.lastStatus(context)) }
+    var lastGesture by remember { mutableStateOf(BotRuntime.lastGesture(context)) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
@@ -94,6 +97,9 @@ private fun BotControlScreen() {
             refreshAttempts = BotRuntime.refreshAttempts(context)
             nextRefreshAt = BotRuntime.nextRefreshAt(context)
             catchLogs = BotRuntime.catchLogs(context)
+            activePackage = BotRuntime.activePackage(context)
+            lastStatus = BotRuntime.lastStatus(context)
+            lastGesture = BotRuntime.lastGesture(context)
             nowMillis = System.currentTimeMillis()
             delay(350L)
         }
@@ -102,7 +108,7 @@ private fun BotControlScreen() {
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     val nextRefreshText = when {
         !running -> "PAUSED"
-        nextRefreshAt <= 0L -> "SCANNING / WAITING FOR GLOVO"
+        nextRefreshAt <= 0L -> "SCANNING / WAITING"
         nextRefreshAt <= nowMillis -> "NOW"
         else -> timeFormatter.format(Date(nextRefreshAt))
     }
@@ -171,6 +177,25 @@ private fun BotControlScreen() {
                     modifier = Modifier.padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Text("DIAGNOSTICS", color = ControlMuted, fontWeight = FontWeight.Bold)
+                    Text("Active package:", color = ControlMuted, fontSize = 14.sp)
+                    Text(activePackage, color = Color.White, fontSize = 15.sp)
+                    Text("Bot status:", color = ControlMuted, fontSize = 14.sp)
+                    Text(lastStatus, color = Color.White, fontSize = 16.sp)
+                    Text("Last refresh gesture:", color = ControlMuted, fontSize = 14.sp)
+                    Text(lastGesture, color = Color.White, fontSize = 15.sp)
+                }
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = ControlCard),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text("LIVE STATS", color = ControlMuted, fontWeight = FontWeight.Bold)
                     Text("Refreshes: $refreshAttempts", color = Color.White, fontSize = 17.sp)
                     Text("Detected Book buttons: $detections", color = Color.White, fontSize = 17.sp)
@@ -215,6 +240,17 @@ private fun BotControlScreen() {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(if (accessibilityEnabled) "START BOT" else "ENABLE ACCESSIBILITY FIRST")
+            }
+
+            OutlinedButton(
+                onClick = {
+                    BotRuntime.setRunning(context, true)
+                    BotRuntime.requestImmediateRefresh(context)
+                    running = true
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("REFRESH NOW")
             }
 
             if (running) {
@@ -354,7 +390,8 @@ private fun openOverlayPermission(context: Context) {
 private fun openGlovoRider(context: Context) {
     val launchIntent = listOf(
         "com.logistics.rider.glovo",
-        "com.glovoapp.courier"
+        "com.glovoapp.courier",
+        "com.glovoapp.rider"
     ).firstNotNullOfOrNull { packageName ->
         context.packageManager.getLaunchIntentForPackage(packageName)
     }
