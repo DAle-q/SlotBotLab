@@ -21,6 +21,11 @@ object BotRuntime {
     private const val KEY_OVERLAY_VISIBLE = "overlay_visible"
     private const val KEY_NEXT_REFRESH_AT = "next_refresh_at"
     private const val KEY_CATCH_LOGS = "catch_logs"
+    private const val KEY_ACTIVE_PACKAGE = "active_package"
+    private const val KEY_LAST_STATUS = "last_status"
+    private const val KEY_LAST_GESTURE = "last_gesture"
+    private const val KEY_IMMEDIATE_REFRESH_REQUESTED = "immediate_refresh_requested"
+
     private const val MAX_CATCH_LOGS = 50
     private const val DUPLICATE_CATCH_WINDOW_MS = 30_000L
 
@@ -34,6 +39,7 @@ object BotRuntime {
 
         if (!running) {
             setNextRefreshAt(context, 0L)
+            setStatus(context, "Paused")
         }
     }
 
@@ -96,6 +102,47 @@ object BotRuntime {
 
     fun setNextRefreshAt(context: Context, epochMillis: Long) {
         prefs(context).edit().putLong(KEY_NEXT_REFRESH_AT, epochMillis).apply()
+    }
+
+    fun activePackage(context: Context): String =
+        prefs(context).getString(KEY_ACTIVE_PACKAGE, "Unknown") ?: "Unknown"
+
+    fun setActivePackage(context: Context, packageName: String?) {
+        prefs(context).edit()
+            .putString(KEY_ACTIVE_PACKAGE, packageName?.ifBlank { "Unknown" } ?: "Unknown")
+            .apply()
+    }
+
+    fun lastStatus(context: Context): String =
+        prefs(context).getString(KEY_LAST_STATUS, "Waiting") ?: "Waiting"
+
+    fun setStatus(context: Context, status: String) {
+        prefs(context).edit().putString(KEY_LAST_STATUS, status).apply()
+    }
+
+    fun lastGesture(context: Context): String =
+        prefs(context).getString(KEY_LAST_GESTURE, "No refresh gesture yet")
+            ?: "No refresh gesture yet"
+
+    fun setLastGesture(context: Context, gesture: String) {
+        prefs(context).edit().putString(KEY_LAST_GESTURE, gesture).apply()
+    }
+
+    fun requestImmediateRefresh(context: Context) {
+        prefs(context).edit()
+            .putBoolean(KEY_IMMEDIATE_REFRESH_REQUESTED, true)
+            .putLong(KEY_NEXT_REFRESH_AT, 0L)
+            .apply()
+        setStatus(context, "Manual refresh requested")
+    }
+
+    @Synchronized
+    fun consumeImmediateRefreshRequest(context: Context): Boolean {
+        val requested = prefs(context).getBoolean(KEY_IMMEDIATE_REFRESH_REQUESTED, false)
+        if (requested) {
+            prefs(context).edit().putBoolean(KEY_IMMEDIATE_REFRESH_REQUESTED, false).apply()
+        }
+        return requested
     }
 
     @Synchronized
