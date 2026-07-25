@@ -26,9 +26,8 @@ import kotlin.math.roundToInt
 
 class FloatingBotControlService : Service() {
 
-    private lateinit var windowManager: WindowManager
+    private var windowManager: WindowManager? = null
     private var overlayView: View? = null
-    private var layoutParams: WindowManager.LayoutParams? = null
     private var toggleButton: Button? = null
 
     private val handler = Handler(Looper.getMainLooper())
@@ -42,6 +41,8 @@ class FloatingBotControlService : Service() {
     override fun onCreate() {
         super.onCreate()
 
+        isActive = false
+
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
             return
@@ -51,12 +52,31 @@ class FloatingBotControlService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        showOverlay()
-        BotRuntime.setOverlayVisible(this, true)
+
+        val shown = runCatching {
+            showOverlay()
+            true
+        }.getOrElse {
+            false
+        }
+
+        if (!shown) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
+        isActive = true
         handler.post(refreshUi)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (overlayView == null && Settings.canDrawOverlays(this)) {
+            runCatching { showOverlay() }
+                .onSuccess { isActive = true }
+                .onFailure { stopSelf() }
+        }
+
         return START_STICKY
     }
 
@@ -64,18 +84,25 @@ class FloatingBotControlService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        overlayView?.let {
-            runCatching { windowManager.removeView(it) }
+
+        val manager = windowManager
+        val view = overlayView
+        if (manager != null && view != null) {
+            runCatching { manager.removeView(view) }
         }
+
         overlayView = null
-        BotRuntime.setOverlayVisible(this, false)
+        toggleButton = null
+        isActive = false
         super.onDestroy()
     }
 
     private fun showOverlay() {
         if (overlayView != null) return
 
-        val density = resources.displayMetrics.density
+        val manager = windowManager
+            ?: error("WindowManager is not initialized")
+
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -103,7 +130,10 @@ class FloatingBotControlService : Service() {
             setTextColor(Color.WHITE)
             background = roundedBackground(Color.rgb(0, 140, 115), 22f)
             setOnClickListener {
-                BotRuntime.setRunning(this@FloatingBotControlService, !BotRuntime.isRunning(this@FloatingBotControlService))
+                BotRuntime.setRunning(
+                    this@FloatingBotControlService,
+                    !BotRuntime.isRunning(this@FloatingBotControlService)
+                )
                 updateToggleButton()
             }
         }
@@ -132,7 +162,10 @@ class FloatingBotControlService : Service() {
         )
         container.addView(
             toggle,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)).apply {
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(44)
+            ).apply {
                 marginEnd = dp(6)
             }
         )
@@ -156,9 +189,8 @@ class FloatingBotControlService : Service() {
 
         dragHandle.setOnTouchListener(DragTouchListener(params))
 
+        manager.addView(container, params)
         overlayView = container
-        layoutParams = params
-        windowManager.addView(container, params)
         updateToggleButton()
     }
 
@@ -194,7 +226,11 @@ class FloatingBotControlService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     params.x = startX + (event.rawX - touchX).roundToInt()
                     params.y = startY + (event.rawY - touchY).roundToInt()
-                    overlayView?.let { windowManager.updateViewLayout(it, params) }
+                    val manager = windowManager
+                    val overlay = overlayView
+                    if (manager != null && overlay != null) {
+                        manager.updateViewLayout(overlay, params)
+                    }
                     return true
                 }
             }
@@ -241,6 +277,10 @@ class FloatingBotControlService : Service() {
         (value * resources.displayMetrics.density).roundToInt()
 
     companion object {
+        @Volatile
+        var isActive: Boolean = false
+            private set
+
         private const val CHANNEL_ID = "slotbot_overlay"
         private const val NOTIFICATION_ID = 4102
     }
