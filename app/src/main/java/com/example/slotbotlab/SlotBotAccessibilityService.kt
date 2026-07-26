@@ -19,12 +19,17 @@ class SlotBotAccessibilityService : AccessibilityService() {
     private var loopScheduled = false
     private val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
+    private var waitingForConfirmation = false
+    private var pendingSlotName = "Unknown session"
+    private var confirmationPollsLeft = 0
+
     private val loop = object : Runnable {
         override fun run() {
             val foregroundPackage = rootInActiveWindow?.packageName?.toString()
             rememberExternalPackage(foregroundPackage)
 
             if (!BotRuntime.isRunning(this@SlotBotAccessibilityService)) {
+                resetPendingBooking()
                 BotRuntime.setNextRefreshAt(this@SlotBotAccessibilityService, 0L)
                 BotRuntime.setStatus(this@SlotBotAccessibilityService, "Paused")
                 handler.postDelayed(this, STOPPED_RECHECK_MS)
@@ -42,10 +47,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                     this@SlotBotAccessibilityService,
                     "Waiting for ${timeFormatter.format(Date(nextRefreshAt))}"
                 )
-                handler.postDelayed(
-                    this,
-                    minOf(SCHEDULE_HEARTBEAT_MS, nextRefreshAt - now)
-                )
+                handler.postDelayed(this, minOf(SCHEDULE_HEARTBEAT_MS, nextRefreshAt - now))
                 return
             }
 
@@ -88,12 +90,14 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        resetPendingBooking()
         BotRuntime.setRunning(this, false)
         BotRuntime.setStatus(this, "Accessibility service interrupted")
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        resetPendingBooking()
         BotRuntime.setNextRefreshAt(this, 0L)
         BotRuntime.setStatus(this, "Accessibility service stopped")
         loopScheduled = false
@@ -122,6 +126,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         refreshIfEmpty: Boolean
     ) {
         if (!BotRuntime.isRunning(this)) {
+            resetPendingBooking()
             BotRuntime.setNextRefreshAt(this, 0L)
             handler.postDelayed(loop, STOPPED_RECHECK_MS)
             return
@@ -136,21 +141,57 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
         val confirmationTargets = findExactClickTargets(CONFIRM_BOOK_TEXT, roots)
         if (confirmationTargets.isNotEmpty()) {
-            val slotName = extractSessionDescriptor(roots)
-            BotRuntime.setStatus(this, "Confirming $slotName")
+            if (waitingForConfirmation) {
+                BotRuntime.recordBookClick(this)
+                waitingForConfirmation = false
+            }
 
-            if (clickNode(confirmationTargets.first())) {
-                BotRuntime.recordClickAttempt(this, 1)
-                BotRuntime.recordConfirmationClick(this)
-                BotRuntime.recordCatch(this, slotName)
-                BotRuntime.setStatus(this, "Caught $slotName")
+            val slotName = extractSessionDescriptor(roots)
+                .takeUnless { it == "Unknown session" }
+                ?: pendingSlotName
+
+            BotRuntime.setStatus(this, "Tapping Book session for $slotName")
+            tapNodeByCoordinates(
+                node = confirmationTargets.first(),
+                label = CONFIRM_BOOK_TEXT,
+                onCompleted = {
+                    BotRuntime.recordClickAttempt(this, 1)
+                    BotRuntime.recordConfirmationClick(this)
+                    BotRuntime.recordCatch(this, slotName)
+                    BotRuntime.setStatus(this, "Confirmation tap completed for $slotName")
+                    resetPendingBooking()
+                    handler.postDelayed(
+                        { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                        POST_CONFIRM_SETTLE_MS
+                    )
+                },
+                onFailed = {
+                    BotRuntime.setStatus(this, "Book session coordinate tap failed")
+                    resetPendingBooking()
+                    retryOrContinue(attempt, refreshIfEmpty)
+                }
+            )
+            return
+        }
+
+        if (waitingForConfirmation) {
+            if (confirmationPollsLeft > 0) {
+                confirmationPollsLeft--
+                BotRuntime.setStatus(
+                    this,
+                    "Waiting for confirmation (${confirmationPollsLeft + 1})"
+                )
                 handler.postDelayed(
                     { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
-                    POST_ACTION_SETTLE_MS
+                    CONFIRMATION_POLL_DELAY_MS
                 )
             } else {
-                BotRuntime.setStatus(this, "Book session click failed")
-                retryOrContinue(attempt, refreshIfEmpty)
+                BotRuntime.setStatus(this, "Book tap did not open confirmation")
+                resetPendingBooking()
+                handler.postDelayed(
+                    { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                    FAILED_BOOK_COOLDOWN_MS
+                )
             }
             return
         }
@@ -158,24 +199,38 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val bookTargets = findExactClickTargets(BOOK_TEXT, roots)
         if (bookTargets.isNotEmpty()) {
             BotRuntime.recordDetection(this, bookTargets.size)
-            BotRuntime.setStatus(this, "Found ${bookTargets.size} Book button(s)")
+            pendingSlotName = extractSessionDescriptorNearNode(bookTargets.first())
+            waitingForConfirmation = true
+            confirmationPollsLeft = MAX_CONFIRMATION_POLLS
 
-            if (clickNode(bookTargets.first())) {
-                BotRuntime.recordClickAttempt(this, 1)
-                BotRuntime.recordBookClick(this)
-                BotRuntime.setStatus(this, "Opened booking confirmation")
-                handler.postDelayed(
-                    { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
-                    POST_ACTION_SETTLE_MS
-                )
-            } else {
-                BotRuntime.setStatus(this, "Book click failed")
-                retryOrContinue(attempt, refreshIfEmpty)
-            }
+            BotRuntime.setStatus(this, "Coordinate tapping Book for $pendingSlotName")
+            tapNodeByCoordinates(
+                node = bookTargets.first(),
+                label = BOOK_TEXT,
+                onCompleted = {
+                    BotRuntime.recordClickAttempt(this, 1)
+                    BotRuntime.setStatus(this, "Book tap completed, waiting for confirmation")
+                    handler.postDelayed(
+                        { scanCurrentScreen(attempt = 0, refreshIfEmpty = false) },
+                        CONFIRMATION_POLL_DELAY_MS
+                    )
+                },
+                onFailed = {
+                    BotRuntime.setStatus(this, "Book coordinate tap failed")
+                    resetPendingBooking()
+                    retryOrContinue(attempt, refreshIfEmpty)
+                }
+            )
             return
         }
 
         retryOrContinue(attempt, refreshIfEmpty)
+    }
+
+    private fun resetPendingBooking() {
+        waitingForConfirmation = false
+        pendingSlotName = "Unknown session"
+        confirmationPollsLeft = 0
     }
 
     private fun retryOrContinue(
@@ -184,12 +239,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
     ) {
         if (attempt < MAX_SCAN_RETRIES) {
             handler.postDelayed(
-                {
-                    scanCurrentScreen(
-                        attempt = attempt + 1,
-                        refreshIfEmpty = refreshIfEmpty
-                    )
-                },
+                { scanCurrentScreen(attempt + 1, refreshIfEmpty) },
                 SCAN_RETRY_DELAY_MS
             )
             return
@@ -224,10 +274,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val delayMs = Random.nextLong(
-            MIN_REFRESH_INTERVAL_MS,
-            MAX_REFRESH_INTERVAL_MS + 1L
-        )
+        val delayMs = Random.nextLong(MIN_REFRESH_INTERVAL_MS, MAX_REFRESH_INTERVAL_MS + 1L)
         val next = System.currentTimeMillis() + delayMs
 
         BotRuntime.setNextRefreshAt(this, next)
@@ -255,14 +302,8 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val scrollableBounds = scrollable?.let {
-            Rect().also(it::getBoundsInScreen)
-        }
-        performPullToRefresh(
-            roots = roots,
-            preferredBounds = scrollableBounds,
-            onFinished = onFinished
-        )
+        val scrollableBounds = scrollable?.let { Rect().also(it::getBoundsInScreen) }
+        performPullToRefresh(roots, scrollableBounds, onFinished)
     }
 
     private fun performPullToRefresh(
@@ -296,60 +337,34 @@ class SlotBotAccessibilityService : AccessibilityService() {
             Random.nextInt(-maxOffsetPx, maxOffsetPx + 1).toFloat()
 
         val listAnchorBottom = findSessionListAnchorBottom(roots)
-
         val horizontalPadding = dp(18).toFloat()
-
         val topLimit = usable.top + dp(18).toFloat()
-
-        val bottomLimit = minOf(
-            usable.bottom - dp(18),
-            safeBottom
-        ).toFloat()
-
+        val bottomLimit = minOf(usable.bottom - dp(18), safeBottom).toFloat()
         val usableHeight = (bottomLimit - topLimit).coerceAtLeast(0f)
 
-// Horizontal randomness: ±150px
         val x = (
-                usable.centerX().toFloat() +
-                        randomOffset(150)
-                ).coerceIn(
-                usable.left + horizontalPadding,
-                usable.right - horizontalPadding
-            )
+            usable.centerX().toFloat() + randomOffset(150)
+        ).coerceIn(
+            usable.left + horizontalPadding,
+            usable.right - horizontalPadding
+        )
 
-// Start immediately after the middle of the screen
-        val desiredStartY =
-            topLimit + usableHeight * 0.51f
-
-        val startRandomness =
-            (usableHeight * 0.01f).toInt()
-
+        val desiredStartY = topLimit + usableHeight * 0.51f
+        val startRandomness = (usableHeight * 0.01f).toInt()
         val startY = (
-                desiredStartY +
-                        randomOffset(startRandomness)
-                ).coerceIn(
-                topLimit + usableHeight * 0.50f,
-                bottomLimit - usableHeight * 0.42f
-            )
+            desiredStartY + randomOffset(startRandomness)
+        ).coerceIn(
+            topLimit + usableHeight * 0.50f,
+            bottomLimit - usableHeight * 0.42f
+        )
 
-// Previously 25%, now approximately 50%
-        val baseSwipeDistance =
-            usableHeight * 0.50f
-
-        val swipeRandomness =
-            (usableHeight * 0.02f).toInt()
-
+        val baseSwipeDistance = usableHeight * 0.50f
+        val swipeRandomness = (usableHeight * 0.02f).toInt()
         val swipeDistance = (
-                baseSwipeDistance +
-                        randomOffset(swipeRandomness)
-                ).coerceAtLeast(
-                usableHeight * 0.42f
-            )
+            baseSwipeDistance + randomOffset(swipeRandomness)
+        ).coerceAtLeast(usableHeight * 0.42f)
 
-// Top-to-bottom swipe
-        val endY = (
-                startY + swipeDistance
-                ).coerceAtMost(bottomLimit)
+        val endY = (startY + swipeDistance).coerceAtMost(bottomLimit)
 
         val targetPackage = roots
             .mapNotNull { it.packageName?.toString() }
@@ -390,10 +405,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                         this@SlotBotAccessibilityService,
                         "Completed at ${timeFormatter.format(Date())}: $gestureDescription"
                     )
-                    BotRuntime.setStatus(
-                        this@SlotBotAccessibilityService,
-                        "Refresh swipe completed"
-                    )
+                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh swipe completed")
                     onFinished()
                 }
 
@@ -402,10 +414,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                         this@SlotBotAccessibilityService,
                         "Cancelled at ${timeFormatter.format(Date())}: $gestureDescription"
                     )
-                    BotRuntime.setStatus(
-                        this@SlotBotAccessibilityService,
-                        "Refresh swipe cancelled"
-                    )
+                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh swipe cancelled")
                     handler.postDelayed({ onFinished() }, 400L)
                 }
             },
@@ -416,6 +425,63 @@ class SlotBotAccessibilityService : AccessibilityService() {
             BotRuntime.setLastGesture(this, "dispatchGesture returned false: $gestureDescription")
             BotRuntime.setStatus(this, "Android rejected refresh swipe")
             handler.postDelayed({ onFinished() }, 400L)
+        }
+    }
+
+    private fun tapNodeByCoordinates(
+        node: AccessibilityNodeInfo,
+        label: String,
+        onCompleted: () -> Unit,
+        onFailed: () -> Unit
+    ) {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.isEmpty || !node.isVisibleToUser || !node.isEnabled) {
+            onFailed()
+            return
+        }
+
+        val x = bounds.exactCenterX()
+        val y = bounds.exactCenterY()
+        val tapDescription = "$label at ${x.toInt()},${y.toInt()} bounds=${bounds.toShortString()}"
+        BotRuntime.setLastGesture(this, "Tap dispatched: $tapDescription")
+
+        val path = Path().apply { moveTo(x, y) }
+        val tap = GestureDescription.Builder()
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    TAP_DURATION_MS
+                )
+            )
+            .build()
+
+        val dispatched = dispatchGesture(
+            tap,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescriptionResult: GestureDescription?) {
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Tap completed at ${timeFormatter.format(Date())}: $tapDescription"
+                    )
+                    onCompleted()
+                }
+
+                override fun onCancelled(gestureDescriptionResult: GestureDescription?) {
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Tap cancelled at ${timeFormatter.format(Date())}: $tapDescription"
+                    )
+                    onFailed()
+                }
+            },
+            handler
+        )
+
+        if (!dispatched) {
+            BotRuntime.setLastGesture(this, "Tap rejected: $tapDescription")
+            onFailed()
         }
     }
 
@@ -434,8 +500,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
             val bounds = Rect()
             root.getBoundsInScreen(bounds)
-            val key = "$rootPackageName:${bounds.toShortString()}"
-            unique.putIfAbsent(key, root)
+            unique.putIfAbsent("$rootPackageName:${bounds.toShortString()}", root)
         }
 
         return unique.values.toList()
@@ -447,12 +512,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         walkTree(root) { node ->
             if (score >= 4 || !node.isVisibleToUser) return@walkTree
 
-            val labels = listOfNotNull(
-                node.text?.toString()?.trim(),
-                node.contentDescription?.toString()?.trim()
-            )
-
-            labels.forEach { label ->
+            labelsOf(node).forEach { label ->
                 score += when {
                     label.equals("Available sessions", ignoreCase = true) -> 2
                     label.equals("MY SESSIONS", ignoreCase = true) -> 1
@@ -471,54 +531,33 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
     private fun isAvailableSessionsScreen(roots: List<AccessibilityNodeInfo>): Boolean {
         var matched = false
-
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (matched || !node.isVisibleToUser) return@walkTree
-
-                val labels = listOfNotNull(
-                    node.text?.toString()?.trim(),
-                    node.contentDescription?.toString()?.trim()
-                )
-
-                if (labels.any(::matchesAvailableSessionsMarker)) {
-                    matched = true
-                }
+                if (labelsOf(node).any(::matchesAvailableSessionsMarker)) matched = true
             }
         }
-
         return matched
     }
 
-    private fun matchesAvailableSessionsMarker(label: String): Boolean {
-        return label.equals("Available sessions", ignoreCase = true) ||
+    private fun matchesAvailableSessionsMarker(label: String): Boolean =
+        label.equals("Available sessions", ignoreCase = true) ||
             label.equals("AVAILABLE SESSIONS", ignoreCase = true) ||
             label.startsWith("Applied filters", ignoreCase = true) ||
             label.contains("No sessions matching", ignoreCase = true) ||
             label.startsWith("Filters (", ignoreCase = true)
-    }
 
-    private fun findSessionListAnchorBottom(
-        roots: List<AccessibilityNodeInfo>
-    ): Int? {
+    private fun findSessionListAnchorBottom(roots: List<AccessibilityNodeInfo>): Int? {
         var anchorBottom = 0
-
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser) return@walkTree
-
-                val labels = listOfNotNull(
-                    node.text?.toString()?.trim(),
-                    node.contentDescription?.toString()?.trim()
-                )
-
-                val isAnchor = labels.any { label ->
+                val isAnchor = labelsOf(node).any { label ->
                     label.startsWith("Applied filters", ignoreCase = true) ||
                         label == "BEG WEST" ||
                         label == "BEG EAST" ||
                         FILTER_TIME_REGEX.matches(label)
                 }
-
                 if (isAnchor) {
                     val bounds = Rect()
                     node.getBoundsInScreen(bounds)
@@ -526,13 +565,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 }
             }
         }
-
         return anchorBottom.takeIf { it > 0 }
     }
 
-    private fun findBestScrollableNode(
-        roots: List<AccessibilityNodeInfo>
-    ): AccessibilityNodeInfo? {
+    private fun findBestScrollableNode(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
         val metrics = resources.displayMetrics
         val screenArea = metrics.widthPixels.toLong() * metrics.heightPixels.toLong()
         var bestNode: AccessibilityNodeInfo? = null
@@ -541,7 +577,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
-
                 val hasScrollAction = node.actionList.any {
                     it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
                         it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
@@ -554,14 +589,12 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
                 val area = bounds.width().toLong() * bounds.height().toLong()
                 if (area < screenArea / 12L) return@walkTree
-
                 if (area > bestScore) {
                     bestScore = area
                     bestNode = node
                 }
             }
         }
-
         return bestNode
     }
 
@@ -574,55 +607,76 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
-
-                val text = node.text?.toString()?.trim()
-                val description = node.contentDescription?.toString()?.trim()
-
-                if (
-                    !text.equals(exactLabel, ignoreCase = true) &&
-                    !description.equals(exactLabel, ignoreCase = true)
-                ) {
-                    return@walkTree
-                }
+                if (labelsOf(node).none { it.equals(exactLabel, ignoreCase = true) }) return@walkTree
 
                 val target = findClickableAncestor(node) ?: node
                 val bounds = Rect()
                 target.getBoundsInScreen(bounds)
-
-                if (!bounds.isEmpty) {
-                    uniqueTargets.putIfAbsent(bounds.toShortString(), target)
-                }
+                if (!bounds.isEmpty) uniqueTargets.putIfAbsent(bounds.toShortString(), target)
             }
         }
 
-        return uniqueTargets.values.toList()
+        return uniqueTargets.values
+            .sortedBy {
+                Rect().also(it::getBoundsInScreen).top
+            }
     }
 
     private fun extractSessionDescriptor(roots: List<AccessibilityNodeInfo>): String {
         val labels = mutableListOf<String>()
-
         roots.forEach { root ->
             walkTree(root) { node ->
-                if (!node.isVisibleToUser) return@walkTree
-
-                val text = node.text?.toString()?.trim()
-                val description = node.contentDescription?.toString()?.trim()
-
-                if (!text.isNullOrBlank()) labels.add(text)
-                if (!description.isNullOrBlank() && description != text) labels.add(description)
+                if (node.isVisibleToUser) labels.addAll(labelsOf(node))
             }
         }
 
-        val time = labels.firstNotNullOfOrNull { label ->
-            SESSION_TIME_REGEX.find(label)?.value
-        }
-        val area = labels.firstOrNull { label -> AREA_REGEX.matches(label) }
-
-        return listOfNotNull(time, area)
-            .distinct()
-            .joinToString(" | ")
+        val time = labels.firstNotNullOfOrNull { SESSION_TIME_REGEX.find(it)?.value }
+        val area = labels.firstOrNull { AREA_REGEX.matches(it) }
+        return listOfNotNull(time, area).distinct().joinToString(" | ")
             .ifBlank { "Unknown session" }
     }
+
+    private fun extractSessionDescriptorNearNode(node: AccessibilityNodeInfo): String {
+        val buttonBounds = Rect()
+        node.getBoundsInScreen(buttonBounds)
+        val roots = supportedRoots()
+        val candidates = mutableListOf<Pair<Int, String>>()
+
+        roots.forEach { root ->
+            walkTree(root) { candidate ->
+                if (!candidate.isVisibleToUser) return@walkTree
+                val bounds = Rect()
+                candidate.getBoundsInScreen(bounds)
+                if (bounds.isEmpty) return@walkTree
+
+                val verticalDistance = kotlin.math.abs(bounds.centerY() - buttonBounds.centerY())
+                labelsOf(candidate).forEach { label ->
+                    if (SESSION_TIME_REGEX.containsMatchIn(label) || AREA_REGEX.matches(label)) {
+                        candidates.add(verticalDistance to label)
+                    }
+                }
+            }
+        }
+
+        val time = candidates
+            .filter { SESSION_TIME_REGEX.containsMatchIn(it.second) }
+            .minByOrNull { it.first }
+            ?.second
+            ?.let { SESSION_TIME_REGEX.find(it)?.value }
+        val area = candidates
+            .filter { AREA_REGEX.matches(it.second) }
+            .minByOrNull { it.first }
+            ?.second
+
+        return listOfNotNull(time, area).distinct().joinToString(" | ")
+            .ifBlank { "Unknown session" }
+    }
+
+    private fun labelsOf(node: AccessibilityNodeInfo): List<String> =
+        listOfNotNull(
+            node.text?.toString()?.trim()?.takeIf(String::isNotBlank),
+            node.contentDescription?.toString()?.trim()?.takeIf(String::isNotBlank)
+        ).distinct()
 
     private inline fun walkTree(
         root: AccessibilityNodeInfo,
@@ -630,28 +684,22 @@ class SlotBotAccessibilityService : AccessibilityService() {
     ) {
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
-
         while (queue.isNotEmpty()) {
             val node = queue.removeFirst()
             visit(node)
-
             for (index in 0 until node.childCount) {
                 node.getChild(index)?.let(queue::addLast)
             }
         }
     }
 
-    private fun findClickableAncestor(
-        startNode: AccessibilityNodeInfo
-    ): AccessibilityNodeInfo? {
+    private fun findClickableAncestor(startNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var node: AccessibilityNodeInfo? = startNode
-
         repeat(10) {
             val current = node ?: return null
             val hasClickAction = current.actionList.any {
                 it.id == AccessibilityNodeInfo.ACTION_CLICK
             }
-
             if (
                 current.isEnabled &&
                 current.isVisibleToUser &&
@@ -659,37 +707,9 @@ class SlotBotAccessibilityService : AccessibilityService() {
             ) {
                 return current
             }
-
             node = current.parent
         }
-
         return null
-    }
-
-    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
-        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            return true
-        }
-
-        val bounds = Rect()
-        node.getBoundsInScreen(bounds)
-        if (bounds.isEmpty) return false
-
-        val path = Path().apply {
-            moveTo(bounds.exactCenterX(), bounds.exactCenterY())
-        }
-
-        val tap = GestureDescription.Builder()
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    path,
-                    0L,
-                    80L
-                )
-            )
-            .build()
-
-        return dispatchGesture(tap, null, handler)
     }
 
     private fun dp(value: Int): Int =
@@ -716,12 +736,16 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
         private const val MAX_SCAN_RETRIES = 6
         private const val SCAN_RETRY_DELAY_MS = 350L
-        private const val POST_ACTION_SETTLE_MS = 700L
         private const val REFRESH_SETTLE_MS = 1_400L
         private const val REFRESH_GESTURE_DURATION_MS = 850L
-
         private const val MAX_SCROLL_TO_TOP_STEPS = 5
         private const val SCROLL_TO_TOP_SETTLE_MS = 250L
+
+        private const val TAP_DURATION_MS = 120L
+        private const val CONFIRMATION_POLL_DELAY_MS = 350L
+        private const val MAX_CONFIRMATION_POLLS = 12
+        private const val FAILED_BOOK_COOLDOWN_MS = 1_000L
+        private const val POST_CONFIRM_SETTLE_MS = 1_000L
 
         private val SUPPORTED_PACKAGES = setOf(
             "com.example.slotbotlab",
