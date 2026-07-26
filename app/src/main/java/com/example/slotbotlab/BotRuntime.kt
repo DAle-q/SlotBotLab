@@ -4,6 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
+
 data class CatchLogEntry(
     val caughtAtMillis: Long,
     val slotName: String
@@ -25,21 +26,34 @@ object BotRuntime {
     private const val KEY_LAST_STATUS = "last_status"
     private const val KEY_LAST_GESTURE = "last_gesture"
     private const val KEY_IMMEDIATE_REFRESH_REQUESTED = "immediate_refresh_requested"
+    private const val KEY_ACTIVE_TARGET_DAY = "active_target_day"
+    private const val KEY_DAY_TARGET_PREFIX = "day_target_"
 
     private const val MAX_CATCH_LOGS = 50
     private const val DUPLICATE_CATCH_WINDOW_MS = 30_000L
+    private const val MAX_DAY_TARGET = 20
+
+    val dayLabels: List<String> = listOf("M", "Tu", "W", "Th", "F", "Sa", "Su")
 
     fun isRunning(context: Context): Boolean =
         prefs(context).getBoolean(KEY_RUNNING, false)
 
     fun setRunning(context: Context, running: Boolean) {
+        val canRun = running && totalDayTargets(context) > 0
         prefs(context).edit()
-            .putBoolean(KEY_RUNNING, running)
+            .putBoolean(KEY_RUNNING, canRun)
             .apply()
 
-        if (!running) {
-            setNextRefreshAt(context, 0L)
-            setStatus(context, "Paused")
+        when {
+            !running -> {
+                setNextRefreshAt(context, 0L)
+                setStatus(context, "Paused")
+            }
+
+            !canRun -> {
+                setNextRefreshAt(context, 0L)
+                setStatus(context, "Set at least one weekday target")
+            }
         }
     }
 
@@ -49,6 +63,54 @@ object BotRuntime {
     fun setIntervalMs(context: Context, intervalMs: Long) {
         prefs(context).edit()
             .putLong(KEY_INTERVAL_MS, intervalMs.coerceIn(2_000L, 60_000L))
+            .apply()
+    }
+
+    fun dayTargets(context: Context): List<Int> =
+        dayLabels.indices.map { dayTarget(context, it) }
+
+    fun dayTarget(context: Context, dayIndex: Int): Int {
+        if (dayIndex !in dayLabels.indices) return 0
+        return prefs(context).getInt("$KEY_DAY_TARGET_PREFIX$dayIndex", 0)
+    }
+
+    @Synchronized
+    fun setDayTarget(context: Context, dayIndex: Int, value: Int) {
+        if (dayIndex !in dayLabels.indices) return
+        prefs(context).edit()
+            .putInt("$KEY_DAY_TARGET_PREFIX$dayIndex", value.coerceIn(0, MAX_DAY_TARGET))
+            .apply()
+
+        if (totalDayTargets(context) == 0) {
+            prefs(context).edit().putBoolean(KEY_RUNNING, false).apply()
+            setNextRefreshAt(context, 0L)
+            setStatus(context, "Plan completed - all weekday targets are zero")
+        }
+    }
+
+    fun incrementDayTarget(context: Context, dayIndex: Int): Int {
+        val updated = (dayTarget(context, dayIndex) + 1).coerceAtMost(MAX_DAY_TARGET)
+        setDayTarget(context, dayIndex, updated)
+        return updated
+    }
+
+    fun decrementDayTarget(context: Context, dayIndex: Int): Int {
+        val updated = (dayTarget(context, dayIndex) - 1).coerceAtLeast(0)
+        setDayTarget(context, dayIndex, updated)
+        return updated
+    }
+
+    fun totalDayTargets(context: Context): Int = dayTargets(context).sum()
+
+    fun requestedDayIndices(context: Context): List<Int> =
+        dayLabels.indices.filter { dayTarget(context, it) > 0 }
+
+    fun activeTargetDay(context: Context): Int =
+        prefs(context).getInt(KEY_ACTIVE_TARGET_DAY, -1)
+
+    fun setActiveTargetDay(context: Context, dayIndex: Int?) {
+        prefs(context).edit()
+            .putInt(KEY_ACTIVE_TARGET_DAY, dayIndex ?: -1)
             .apply()
     }
 
@@ -121,8 +183,7 @@ object BotRuntime {
     }
 
     fun lastGesture(context: Context): String =
-        prefs(context).getString(KEY_LAST_GESTURE, "No refresh gesture yet")
-            ?: "No refresh gesture yet"
+        prefs(context).getString(KEY_LAST_GESTURE, "No gesture yet") ?: "No gesture yet"
 
     fun setLastGesture(context: Context, gesture: String) {
         prefs(context).edit().putString(KEY_LAST_GESTURE, gesture).apply()
