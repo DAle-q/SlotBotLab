@@ -8,32 +8,15 @@
     <application
         android:name=".SlotBotApplication"
         android:allowBackup="true"
-        android:label="SlotBot Lab"
+        android:label="SlotBot"
         android:supportsRtl="true"
         android:theme="@style/Theme.SlotBotLab">
 
         <activity
-            android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-        <activity
-            android:name=".BookingConfirmationActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTop"
-            android:theme="@style/Theme.SlotBotLab.Translucent" />
-
-        <activity
             android:name=".BotControlActivity"
             android:exported="true"
-            android:label="SlotBot Controls"
-            android:launchMode="singleTask"
-            android:taskAffinity="com.example.slotbotlab.controls">
+            android:label="SlotBot"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -52,7 +35,7 @@
         <service
             android:name=".SlotBotAccessibilityService"
             android:exported="true"
-            android:label="SlotBot Lab automation"
+            android:label="SlotBot automation"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
