@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -37,9 +39,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -51,6 +55,8 @@ private val ControlBackground = Color(0xFF101214)
 private val ControlCard = Color(0xFF1C2024)
 private val ControlGreen = Color(0xFF00A884)
 private val ControlMuted = Color(0xFF9AA4AE)
+private val ControlRed = Color(0xFFFF6B6B)
+private val CounterButton = Color(0xFF2A3036)
 
 class BotControlActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,6 +74,8 @@ class BotControlActivity : ComponentActivity() {
 private fun BotControlScreen() {
     val context = LocalContext.current
 
+    var dayTargets by remember { mutableStateOf(BotRuntime.dayTargets(context)) }
+    var activeTargetDay by remember { mutableIntStateOf(BotRuntime.activeTargetDay(context)) }
     var running by remember { mutableStateOf(BotRuntime.isRunning(context)) }
     var accessibilityEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var overlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
@@ -86,6 +94,8 @@ private fun BotControlScreen() {
 
     LaunchedEffect(Unit) {
         while (true) {
+            dayTargets = BotRuntime.dayTargets(context)
+            activeTargetDay = BotRuntime.activeTargetDay(context)
             running = BotRuntime.isRunning(context)
             accessibilityEnabled = isAccessibilityServiceEnabled(context)
             overlayPermission = Settings.canDrawOverlays(context)
@@ -105,10 +115,11 @@ private fun BotControlScreen() {
         }
     }
 
+    val totalTargets = dayTargets.sum()
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     val nextRefreshText = when {
         !running -> "PAUSED"
-        nextRefreshAt <= 0L -> "SCANNING / WAITING"
+        nextRefreshAt <= 0L -> "SCANNING"
         nextRefreshAt <= nowMillis -> "NOW"
         else -> timeFormatter.format(Date(nextRefreshAt))
     }
@@ -122,22 +133,41 @@ private fun BotControlScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(22.dp),
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
+
+            DayTargetPlanner(
+                targets = dayTargets,
+                activeDay = activeTargetDay,
+                onIncrement = { dayIndex ->
+                    BotRuntime.incrementDayTarget(context, dayIndex)
+                    dayTargets = BotRuntime.dayTargets(context)
+                },
+                onDecrement = { dayIndex ->
+                    BotRuntime.decrementDayTarget(context, dayIndex)
+                    dayTargets = BotRuntime.dayTargets(context)
+                }
+            )
 
             Text(
                 text = "SlotBot Control Center",
-                fontSize = 30.sp,
+                fontSize = 27.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
 
             Text(
-                text = "Glovo test mode - random refresh every 1 to 10 minutes",
-                fontSize = 16.sp,
+                text = "One refresh per cycle, then every requested weekday is checked",
+                fontSize = 15.sp,
                 color = ControlMuted
+            )
+
+            StatusCard(
+                title = "Slots remaining",
+                value = totalTargets.toString(),
+                healthy = totalTargets > 0
             )
 
             StatusCard(
@@ -163,7 +193,7 @@ private fun BotControlScreen() {
             )
 
             StatusCard(
-                title = "Next refresh",
+                title = "Next cycle",
                 value = nextRefreshText,
                 healthy = running
             )
@@ -182,7 +212,7 @@ private fun BotControlScreen() {
                     Text(activePackage, color = Color.White, fontSize = 15.sp)
                     Text("Bot status:", color = ControlMuted, fontSize = 14.sp)
                     Text(lastStatus, color = Color.White, fontSize = 16.sp)
-                    Text("Last refresh gesture:", color = ControlMuted, fontSize = 14.sp)
+                    Text("Last gesture:", color = ControlMuted, fontSize = 14.sp)
                     Text(lastGesture, color = Color.White, fontSize = 15.sp)
                 }
             }
@@ -203,7 +233,7 @@ private fun BotControlScreen() {
                     Text("Book session clicks: $confirmationClicks", color = Color.White, fontSize = 17.sp)
                     Text("All successful clicks: $clickAttempts", color = Color.White, fontSize = 17.sp)
                     Text("Refresh range: 01:00-10:00", color = Color.White, fontSize = 17.sp)
-                    Text("Expected average: about 10.9 refreshes/hour", color = ControlMuted, fontSize = 15.sp)
+                    Text("Expected average: about 10.9 cycles/hour", color = ControlMuted, fontSize = 15.sp)
                 }
             }
 
@@ -234,23 +264,34 @@ private fun BotControlScreen() {
                         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     } else {
                         BotRuntime.setRunning(context, true)
-                        running = true
+                        BotRuntime.requestImmediateRefresh(context)
+                        SlotBotAccessibilityService.wakeForManualRefresh()
+                        running = BotRuntime.isRunning(context)
                     }
                 },
+                enabled = !accessibilityEnabled || totalTargets > 0,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(if (accessibilityEnabled) "START BOT" else "ENABLE ACCESSIBILITY FIRST")
+                Text(
+                    when {
+                        !accessibilityEnabled -> "ENABLE ACCESSIBILITY FIRST"
+                        totalTargets <= 0 -> "SET WEEKDAY TARGETS FIRST"
+                        else -> "START BOT"
+                    }
+                )
             }
 
             OutlinedButton(
                 onClick = {
                     BotRuntime.setRunning(context, true)
                     BotRuntime.requestImmediateRefresh(context)
-                    running = true
+                    SlotBotAccessibilityService.wakeForManualRefresh()
+                    running = BotRuntime.isRunning(context)
                 },
+                enabled = accessibilityEnabled && totalTargets > 0,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("REFRESH NOW")
+                Text("RUN CYCLE NOW")
             }
 
             if (running) {
@@ -265,28 +306,11 @@ private fun BotControlScreen() {
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            OutlinedButton(
+                onClick = { openGlovoRider(context) },
+                modifier = Modifier.fillMaxWidth()
             ) {
-                OutlinedButton(
-                    onClick = { openGlovoRider(context) },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("OPEN GLOVO")
-                }
-
-                OutlinedButton(
-                    onClick = {
-                        context.startActivity(
-                            Intent(context, MainActivity::class.java)
-                                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("TEST SCREEN")
-                }
+                Text("OPEN GLOVO")
             }
 
             OutlinedButton(
@@ -310,11 +334,11 @@ private fun BotControlScreen() {
                     if (catchLogs.isEmpty()) {
                         Text("No sessions caught yet", color = Color.White, fontSize = 16.sp)
                     } else {
-                        catchLogs.take(10).forEach { entry ->
+                        catchLogs.take(15).forEach { entry ->
                             Text(
                                 text = "${timeFormatter.format(Date(entry.caughtAtMillis))}  ${entry.slotName}",
                                 color = Color.White,
-                                fontSize = 16.sp
+                                fontSize = 15.sp
                             )
                         }
                     }
@@ -351,6 +375,98 @@ private fun BotControlScreen() {
 }
 
 @Composable
+private fun DayTargetPlanner(
+    targets: List<Int>,
+    activeDay: Int,
+    onIncrement: (Int) -> Unit,
+    onDecrement: (Int) -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = ControlCard),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "SLOTS NEEDED",
+                color = ControlMuted,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                BotRuntime.dayLabels.forEachIndexed { index, label ->
+                    val value = targets.getOrElse(index) { 0 }
+                    val active = index == activeDay
+
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (active) ControlGreen else Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                            textAlign = TextAlign.Center
+                        )
+
+                        CounterButton(
+                            text = "+",
+                            enabled = value < 20,
+                            onClick = { onIncrement(index) }
+                        )
+
+                        Text(
+                            text = value.toString(),
+                            color = if (value > 0) Color.White else ControlMuted,
+                            fontSize = 21.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        CounterButton(
+                            text = "−",
+                            enabled = value > 0,
+                            onClick = { onDecrement(index) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CounterButton(
+    text: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(32.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (enabled) CounterButton else Color(0xFF181B1E))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = if (enabled) Color.White else Color(0xFF555B61),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
 private fun StatusCard(
     title: String,
     value: String,
@@ -371,7 +487,7 @@ private fun StatusCard(
             Text(title, color = Color.White, fontSize = 18.sp)
             Text(
                 text = value,
-                color = if (healthy) ControlGreen else Color(0xFFFF6B6B),
+                color = if (healthy) ControlGreen else ControlRed,
                 fontWeight = FontWeight.Bold,
                 fontSize = 15.sp
             )
