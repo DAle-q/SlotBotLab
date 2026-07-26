@@ -16,18 +16,23 @@ import kotlin.random.Random
 
 class SlotBotAccessibilityService : AccessibilityService() {
 
+    private data class ScreenPoint(
+        val x: Float,
+        val y: Float,
+        val source: String
+    )
+
     private val handler = Handler(Looper.getMainLooper())
-    private var loopScheduled = false
     private val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private var loopScheduled = false
 
-    private var waitingForConfirmation = false
-    private var pendingSlotName = "Unknown session"
-    private var confirmationPollsLeft = 0
-
+    private var cycleActive = false
     private var cycleDays = mutableListOf<Int>()
     private var currentDayIndex: Int? = null
-    private var refreshDoneForCycle = false
-    private var cycleActive = false
+
+    private var waitingForConfirmation = false
+    private var confirmationPollsLeft = 0
+    private var pendingSlotName = "Unknown session"
 
     private val loop = object : Runnable {
         override fun run() {
@@ -35,7 +40,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             rememberExternalPackage(foregroundPackage)
 
             if (!BotRuntime.isRunning(this@SlotBotAccessibilityService)) {
-                resetAllTransientState()
+                resetCycleState()
                 BotRuntime.setNextRefreshAt(this@SlotBotAccessibilityService, 0L)
                 BotRuntime.setStatus(this@SlotBotAccessibilityService, "Paused")
                 handler.postDelayed(this, STOPPED_RECHECK_MS)
@@ -53,8 +58,8 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 resetCycleState()
             }
 
-            val nextRefreshAt = BotRuntime.nextRefreshAt(this@SlotBotAccessibilityService)
             val now = System.currentTimeMillis()
+            val nextRefreshAt = BotRuntime.nextRefreshAt(this@SlotBotAccessibilityService)
             if (nextRefreshAt > now) {
                 BotRuntime.setStatus(
                     this@SlotBotAccessibilityService,
@@ -69,12 +74,11 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
             val roots = supportedRoots()
             if (roots.isEmpty()) {
-                val packageLabel = foregroundPackage ?: "no active package"
+                BotRuntime.setNextRefreshAt(this@SlotBotAccessibilityService, 0L)
                 BotRuntime.setStatus(
                     this@SlotBotAccessibilityService,
-                    "Waiting for Available sessions ($packageLabel)"
+                    "Open Available sessions (${foregroundPackage ?: "no active package"})"
                 )
-                BotRuntime.setNextRefreshAt(this@SlotBotAccessibilityService, 0L)
                 handler.postDelayed(this, OUTSIDE_SUPPORTED_APP_RECHECK_MS)
                 return
             }
@@ -85,7 +89,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 ?.let { BotRuntime.setActivePackage(this@SlotBotAccessibilityService, it) }
 
             if (!cycleActive) {
-                startNewCycle()
+                beginCycle()
             }
         }
     }
@@ -106,14 +110,14 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        resetAllTransientState()
+        resetCycleState()
         BotRuntime.setRunning(this, false)
         BotRuntime.setStatus(this, "Accessibility service interrupted")
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        resetAllTransientState()
+        resetCycleState()
         BotRuntime.setNextRefreshAt(this, 0L)
         BotRuntime.setStatus(this, "Accessibility service stopped")
         loopScheduled = false
@@ -132,18 +136,24 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     private fun wakeImmediately() {
-        handler.removeCallbacksAndMessages(null)
+        // Do not clear every Handler callback here. Doing so can remove a gesture callback
+        // while Android is still completing it. Only restart the scheduler loop.
+        handler.removeCallbacks(loop)
         resetCycleState()
+        BotRuntime.setNextRefreshAt(this, 0L)
         BotRuntime.setStatus(this, "Immediate cycle requested")
         handler.post(loop)
     }
 
-    private fun startNewCycle() {
-        if (!BotRuntime.isRunning(this)) {
-            handler.postDelayed(loop, STOPPED_RECHECK_MS)
-            return
-        }
-
+    /**
+     * One cycle is deliberately ordered as:
+     * 1. refresh the currently open Available sessions page;
+     * 2. visit each requested weekday without refreshing again;
+     * 3. schedule the next cycle.
+     *
+     * Refresh therefore cannot be blocked by a calendar-tap failure.
+     */
+    private fun beginCycle() {
         val requestedDays = BotRuntime.requestedDayIndices(this)
         if (requestedDays.isEmpty()) {
             finishPlan()
@@ -151,16 +161,21 @@ class SlotBotAccessibilityService : AccessibilityService() {
         }
 
         cycleActive = true
-        refreshDoneForCycle = false
-        currentDayIndex = null
         cycleDays = requestedDays.toMutableList()
+        currentDayIndex = null
         resetPendingBooking()
 
         BotRuntime.setStatus(
             this,
-            "Starting cycle: ${requestedDays.joinToString { BotRuntime.dayLabels[it] }}"
+            "Refreshing before checking ${requestedDays.joinToString { BotRuntime.dayLabels[it] }}"
         )
-        selectNextRequestedDay()
+
+        performKnownGoodRefreshSwipe {
+            handler.postDelayed(
+                { selectNextRequestedDay() },
+                REFRESH_SETTLE_MS
+            )
+        }
     }
 
     private fun selectNextRequestedDay() {
@@ -185,86 +200,259 @@ class SlotBotAccessibilityService : AccessibilityService() {
         }
 
         val dayIndex = cycleDays.removeAt(0)
-        switchToDay(dayIndex) {
-            currentDayIndex = dayIndex
-            BotRuntime.setActiveTargetDay(this, dayIndex)
+        currentDayIndex = dayIndex
+        BotRuntime.setActiveTargetDay(this, dayIndex)
 
-            if (!refreshDoneForCycle) {
-                refreshDoneForCycle = true
-                BotRuntime.setStatus(
-                    this,
-                    "Refreshing once before checking ${BotRuntime.dayLabels[dayIndex]}"
-                )
-                scrollToTopThenRefresh(step = 0) {
-                    handler.postDelayed(
-                        { scanCurrentDay(attempt = 0) },
-                        REFRESH_SETTLE_MS
-                    )
-                }
-            } else {
+        switchToDay(
+            dayIndex = dayIndex,
+            attempt = 0,
+            onReady = {
                 handler.postDelayed(
                     { scanCurrentDay(attempt = 0) },
                     DAY_SWITCH_SETTLE_MS
                 )
             }
-        }
+        )
     }
 
-    private fun switchToDay(dayIndex: Int, onSelected: () -> Unit) {
+    private fun switchToDay(
+        dayIndex: Int,
+        attempt: Int,
+        onReady: () -> Unit
+    ) {
         if (dayIndex !in BotRuntime.dayLabels.indices) {
             selectNextRequestedDay()
             return
         }
 
-        val metrics = resources.displayMetrics
-        val screenWidth = metrics.widthPixels.toFloat()
-        val screenHeight = metrics.heightPixels.toFloat()
-
-        // Glovo lays out the seven calendar cells evenly from Monday to Sunday.
-        // These ratios match the real 1080x2400 Samsung layout and scale to other screens.
-        val firstDayX = screenWidth * CALENDAR_FIRST_DAY_X_RATIO
-        val lastDayX = screenWidth * CALENDAR_LAST_DAY_X_RATIO
-        val stepX = (lastDayX - firstDayX) / 6f
-        val x = firstDayX + stepX * dayIndex
-        val y = screenHeight * CALENDAR_DATE_Y_RATIO
-        val label = BotRuntime.dayLabels[dayIndex]
-
-        BotRuntime.setStatus(this, "Selecting $label")
-        dispatchTapAt(
-            x = x,
-            y = y,
-            label = "calendar $label",
-            onCompleted = {
-                BotRuntime.setStatus(
-                    this,
-                    "Selected $label at ${x.toInt()},${y.toInt()}"
-                )
-                handler.postDelayed(onSelected, DAY_SWITCH_SETTLE_MS)
-            },
-            onFailed = {
-                BotRuntime.setStatus(this, "Calendar tap failed for $label")
+        val roots = supportedRoots()
+        if (roots.isEmpty()) {
+            if (attempt < MAX_CALENDAR_TAP_RETRIES) {
                 handler.postDelayed(
-                    { switchToDay(dayIndex, onSelected) },
+                    { switchToDay(dayIndex, attempt + 1, onReady) },
                     CALENDAR_RETRY_MS
                 )
+            } else {
+                selectNextRequestedDay()
+            }
+            return
+        }
+
+        val point = resolveCalendarPoint(dayIndex, roots)
+        val label = BotRuntime.dayLabels[dayIndex]
+
+        BotRuntime.setStatus(
+            this,
+            "Selecting $label at ${point.x.toInt()},${point.y.toInt()} (${point.source})"
+        )
+
+        dispatchCalendarTap(
+            x = point.x,
+            y = point.y,
+            label = label,
+            onAccepted = onReady,
+            onRejected = {
+                if (attempt < MAX_CALENDAR_TAP_RETRIES) {
+                    handler.postDelayed(
+                        { switchToDay(dayIndex, attempt + 1, onReady) },
+                        CALENDAR_RETRY_MS
+                    )
+                } else {
+                    BotRuntime.setStatus(this, "Skipping $label after failed calendar taps")
+                    selectNextRequestedDay()
+                }
             }
         )
     }
 
+    private fun resolveCalendarPoint(
+        dayIndex: Int,
+        roots: List<AccessibilityNodeInfo>
+    ): ScreenPoint {
+        findWeekdayLabelPoint(dayIndex, roots)?.let { return it }
+        findDateRowPoint(dayIndex, roots)?.let { return it }
+
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels.toFloat()
+        val height = metrics.heightPixels.toFloat()
+        val firstX = width * CALENDAR_FIRST_DAY_X_RATIO
+        val lastX = width * CALENDAR_LAST_DAY_X_RATIO
+        val x = firstX + ((lastX - firstX) / 6f) * dayIndex
+
+        // The vertical calendar position scales much more reliably from screen width than
+        // from height because Samsung reports a content height that excludes system bars.
+        val y = (width * CALENDAR_DATE_Y_TO_WIDTH_RATIO)
+            .coerceIn(height * 0.25f, height * 0.42f)
+
+        return ScreenPoint(x, y, "fallback")
+    }
+
+    private fun findWeekdayLabelPoint(
+        dayIndex: Int,
+        roots: List<AccessibilityNodeInfo>
+    ): ScreenPoint? {
+        val acceptedLabels = WEEKDAY_NODE_LABELS[dayIndex]
+        val metrics = resources.displayMetrics
+        val screenHeight = metrics.heightPixels
+        var best: ScreenPoint? = null
+
+        roots.forEach { root ->
+            walkTree(root) { node ->
+                if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
+                val labels = labelsOf(node)
+                if (labels.none { candidate ->
+                        acceptedLabels.any { it.equals(candidate, ignoreCase = true) }
+                    }
+                ) {
+                    return@walkTree
+                }
+
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.isEmpty) return@walkTree
+                if (bounds.centerY() !in (screenHeight * 0.12f).toInt()..(screenHeight * 0.42f).toInt()) {
+                    return@walkTree
+                }
+
+                val point = ScreenPoint(
+                    x = bounds.exactCenterX(),
+                    y = bounds.bottom + dp(34).toFloat(),
+                    source = "weekday label"
+                )
+
+                if (best == null || bounds.centerY() > best!!.y - dp(34)) {
+                    best = point
+                }
+            }
+        }
+
+        return best
+    }
+
+    private fun findDateRowPoint(
+        dayIndex: Int,
+        roots: List<AccessibilityNodeInfo>
+    ): ScreenPoint? {
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        val candidates = mutableListOf<ScreenPoint>()
+
+        roots.forEach { root ->
+            walkTree(root) { node ->
+                if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
+                val text = node.text?.toString()?.trim() ?: return@walkTree
+                if (!DAY_NUMBER_REGEX.matches(text)) return@walkTree
+
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.isEmpty) return@walkTree
+                if (bounds.centerY() < height * 0.18f || bounds.centerY() > height * 0.45f) {
+                    return@walkTree
+                }
+                if (bounds.width() > width * 0.25f) return@walkTree
+
+                candidates.add(
+                    ScreenPoint(
+                        x = bounds.exactCenterX(),
+                        y = bounds.exactCenterY(),
+                        source = "date node"
+                    )
+                )
+            }
+        }
+
+        if (candidates.size < 4) return null
+
+        val bestRow = candidates
+            .groupBy { point -> (point.y / dp(18).coerceAtLeast(1)).toInt() }
+            .values
+            .maxByOrNull { row -> row.map { it.x }.distinct().size }
+            ?.sortedBy { it.x }
+            ?: return null
+
+        if (bestRow.size < 4) return null
+
+        val rowY = bestRow.map { it.y }.average().toFloat()
+        val firstX = width * CALENDAR_FIRST_DAY_X_RATIO
+        val lastX = width * CALENDAR_LAST_DAY_X_RATIO
+        val targetX = firstX + ((lastX - firstX) / 6f) * dayIndex
+        val nearest = bestRow.minByOrNull { abs(it.x - targetX) }
+
+        return if (nearest != null && abs(nearest.x - targetX) < width * 0.09f) {
+            ScreenPoint(nearest.x, rowY, "date row")
+        } else {
+            ScreenPoint(targetX, rowY, "date-row interpolation")
+        }
+    }
+
+    /**
+     * Calendar switching must never block the state machine just because Android omits a
+     * GestureResultCallback. Once dispatchGesture accepts the tap, continue after a safe delay.
+     */
+    private fun dispatchCalendarTap(
+        x: Float,
+        y: Float,
+        label: String,
+        onAccepted: () -> Unit,
+        onRejected: () -> Unit
+    ) {
+        val description = "calendar $label at ${x.toInt()},${y.toInt()}"
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    TAP_DURATION_MS
+                )
+            )
+            .build()
+
+        val dispatched = dispatchGesture(
+            gesture,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Completed at ${timeFormatter.format(Date())}: $description"
+                    )
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Cancelled at ${timeFormatter.format(Date())}: $description"
+                    )
+                }
+            },
+            handler
+        )
+
+        if (!dispatched) {
+            BotRuntime.setLastGesture(this, "Android rejected $description")
+            onRejected()
+            return
+        }
+
+        BotRuntime.setLastGesture(this, "Dispatched $description")
+        handler.postDelayed({ onAccepted() }, CALENDAR_CONTINUE_DELAY_MS)
+    }
+
     private fun scanCurrentDay(attempt: Int) {
         if (!BotRuntime.isRunning(this)) {
-            resetAllTransientState()
+            resetCycleState()
             handler.postDelayed(loop, STOPPED_RECHECK_MS)
             return
         }
 
-        val dayIndex = currentDayIndex
-        if (dayIndex == null) {
+        val plannedDay = currentDayIndex
+        if (plannedDay == null) {
             selectNextRequestedDay()
             return
         }
 
-        if (BotRuntime.dayTarget(this, dayIndex) <= 0) {
+        if (BotRuntime.dayTarget(this, plannedDay) <= 0) {
             selectNextRequestedDay()
             return
         }
@@ -285,10 +473,11 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 waitingForConfirmation = false
             }
 
-            val extracted = extractSessionDescriptor(roots)
+            val actualDay = extractConfirmationWeekday(roots) ?: plannedDay
+            val session = extractSessionDescriptor(roots)
                 .takeUnless { it == "Unknown session" }
                 ?: pendingSlotName
-            val logName = "${BotRuntime.dayLabels[dayIndex]} | $extracted"
+            val logName = "${BotRuntime.dayLabels[actualDay]} | $session"
 
             BotRuntime.setStatus(this, "Confirming $logName")
             tapNodeByCoordinates(
@@ -298,18 +487,27 @@ class SlotBotAccessibilityService : AccessibilityService() {
                     BotRuntime.recordClickAttempt(this, 1)
                     BotRuntime.recordConfirmationClick(this)
                     BotRuntime.recordCatch(this, logName)
-                    val remaining = BotRuntime.decrementDayTarget(this, dayIndex)
+
+                    val targetDayToDecrement = if (BotRuntime.dayTarget(this, actualDay) > 0) {
+                        actualDay
+                    } else {
+                        plannedDay
+                    }
+                    val remaining = BotRuntime.decrementDayTarget(this, targetDayToDecrement)
+                    resetPendingBooking()
+
                     BotRuntime.setStatus(
                         this,
-                        "Caught $logName - ${BotRuntime.dayLabels[dayIndex]} remaining: $remaining"
+                        "Caught $logName - ${BotRuntime.dayLabels[targetDayToDecrement]} remaining: $remaining"
                     )
-                    resetPendingBooking()
 
                     handler.postDelayed(
                         {
                             when {
                                 BotRuntime.totalDayTargets(this) <= 0 -> finishPlan()
-                                remaining > 0 -> scanCurrentDay(attempt = 0)
+                                targetDayToDecrement == plannedDay && remaining > 0 -> {
+                                    scanCurrentDay(attempt = 0)
+                                }
                                 else -> selectNextRequestedDay()
                             }
                         },
@@ -317,7 +515,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                     )
                 },
                 onFailed = {
-                    BotRuntime.setStatus(this, "Book session coordinate tap failed")
+                    BotRuntime.setStatus(this, "Book session tap failed")
                     resetPendingBooking()
                     selectNextRequestedDay()
                 }
@@ -356,14 +554,14 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
             BotRuntime.setStatus(
                 this,
-                "Tapping Book on ${BotRuntime.dayLabels[dayIndex]} for $pendingSlotName"
+                "Tapping Book on ${BotRuntime.dayLabels[plannedDay]} for $pendingSlotName"
             )
             tapNodeByCoordinates(
                 node = bookTargets.first(),
                 label = BOOK_TEXT,
                 onCompleted = {
                     BotRuntime.recordClickAttempt(this, 1)
-                    BotRuntime.setStatus(this, "Book tap completed - waiting for confirmation")
+                    BotRuntime.setStatus(this, "Book tapped - waiting for confirmation")
                     handler.postDelayed(
                         { scanCurrentDay(attempt = 0) },
                         CONFIRMATION_POLL_DELAY_MS
@@ -386,44 +584,106 @@ class SlotBotAccessibilityService : AccessibilityService() {
         } else {
             BotRuntime.setStatus(
                 this,
-                "No slot on ${BotRuntime.dayLabels[dayIndex]} - checking next day"
+                "No slot on ${BotRuntime.dayLabels[plannedDay]} - checking next day"
             )
             selectNextRequestedDay()
         }
     }
 
+    private fun extractConfirmationWeekday(
+        roots: List<AccessibilityNodeInfo>
+    ): Int? {
+        var result: Int? = null
+        roots.forEach { root ->
+            walkTree(root) { node ->
+                if (result != null || !node.isVisibleToUser) return@walkTree
+                labelsOf(node).forEach { label ->
+                    FULL_WEEKDAY_NAMES.forEachIndexed { index, weekday ->
+                        if (label.contains(weekday, ignoreCase = true)) {
+                            result = index
+                            return@forEachIndexed
+                        }
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun performKnownGoodRefreshSwipe(onFinished: () -> Unit) {
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels.toFloat()
+        val height = metrics.heightPixels.toFloat()
+
+        // Known-good Samsung gesture: approximately (540,1400) -> (540,1950)
+        // on a 1080x2400 device. Scaling from width keeps it stable when Android reports
+        // a content height that excludes status/navigation bars.
+        val x = width * 0.50f
+        val startY = (width * REFRESH_START_Y_TO_WIDTH_RATIO)
+            .coerceAtMost(height - dp(220))
+        val endY = (startY + width * REFRESH_DISTANCE_TO_WIDTH_RATIO)
+            .coerceAtMost(height - dp(35))
+
+        if (endY - startY < dp(120)) {
+            BotRuntime.setStatus(this, "Refresh area is too small")
+            handler.postDelayed({ onFinished() }, 400L)
+            return
+        }
+
+        val description =
+            "${startY.toInt()}→${endY.toInt()} x=${x.toInt()} fixed-width-scaled"
+        BotRuntime.setLastGesture(this, "Dispatched $description")
+        BotRuntime.setStatus(this, "Dispatching refresh swipe")
+
+        val path = Path().apply {
+            moveTo(x, startY)
+            lineTo(x, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    REFRESH_GESTURE_DURATION_MS
+                )
+            )
+            .build()
+
+        val dispatched = dispatchGesture(
+            gesture,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    BotRuntime.recordRefreshAttempt(this@SlotBotAccessibilityService)
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Completed at ${timeFormatter.format(Date())}: $description"
+                    )
+                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh completed")
+                    onFinished()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    BotRuntime.setLastGesture(
+                        this@SlotBotAccessibilityService,
+                        "Cancelled at ${timeFormatter.format(Date())}: $description"
+                    )
+                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh cancelled")
+                    handler.postDelayed({ onFinished() }, 500L)
+                }
+            },
+            handler
+        )
+
+        if (!dispatched) {
+            BotRuntime.setLastGesture(this, "Android rejected refresh: $description")
+            BotRuntime.setStatus(this, "Android rejected refresh swipe")
+            handler.postDelayed({ onFinished() }, 500L)
+        }
+    }
+
     private fun finishCycleAndScheduleNext() {
         resetCycleState()
-        scheduleNextRandomRefresh()
-    }
 
-    private fun finishPlan() {
-        resetAllTransientState()
-        BotRuntime.setRunning(this, false)
-        BotRuntime.setActiveTargetDay(this, null)
-        BotRuntime.setStatus(this, "Plan completed - all weekday targets are zero")
-    }
-
-    private fun resetPendingBooking() {
-        waitingForConfirmation = false
-        pendingSlotName = "Unknown session"
-        confirmationPollsLeft = 0
-    }
-
-    private fun resetCycleState() {
-        resetPendingBooking()
-        cycleDays.clear()
-        currentDayIndex = null
-        refreshDoneForCycle = false
-        cycleActive = false
-        BotRuntime.setActiveTargetDay(this, null)
-    }
-
-    private fun resetAllTransientState() {
-        resetCycleState()
-    }
-
-    private fun scheduleNextRandomRefresh() {
         if (!BotRuntime.isRunning(this)) {
             BotRuntime.setNextRefreshAt(this, 0L)
             handler.postDelayed(loop, STOPPED_RECHECK_MS)
@@ -440,174 +700,30 @@ class SlotBotAccessibilityService : AccessibilityService() {
             MAX_REFRESH_INTERVAL_MS + 1L
         )
         val next = System.currentTimeMillis() + delayMs
-
         BotRuntime.setNextRefreshAt(this, next)
-        BotRuntime.setStatus(this, "Next multi-day cycle at ${timeFormatter.format(Date(next))}")
+        BotRuntime.setStatus(this, "Next cycle at ${timeFormatter.format(Date(next))}")
         handler.postDelayed(loop, SCHEDULE_HEARTBEAT_MS)
     }
 
-    private fun scrollToTopThenRefresh(
-        step: Int,
-        onFinished: () -> Unit
-    ) {
-        val roots = supportedRoots()
-        val scrollable = findBestScrollableNode(roots)
-
-        if (
-            scrollable != null &&
-            step < MAX_SCROLL_TO_TOP_STEPS &&
-            scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-        ) {
-            BotRuntime.setStatus(this, "Moving session list to top")
-            handler.postDelayed(
-                { scrollToTopThenRefresh(step + 1, onFinished) },
-                SCROLL_TO_TOP_SETTLE_MS
-            )
-            return
-        }
-
-        val scrollableBounds = scrollable?.let {
-            Rect().also(it::getBoundsInScreen)
-        }
-        performPullToRefresh(
-            roots = roots,
-            preferredBounds = scrollableBounds,
-            onFinished = onFinished
-        )
+    private fun finishPlan() {
+        resetCycleState()
+        BotRuntime.setRunning(this, false)
+        BotRuntime.setActiveTargetDay(this, null)
+        BotRuntime.setStatus(this, "Plan completed - all weekday targets are zero")
     }
 
-    private fun performPullToRefresh(
-        roots: List<AccessibilityNodeInfo>,
-        preferredBounds: Rect?,
-        onFinished: () -> Unit
-    ) {
-        val metrics = resources.displayMetrics
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
-        val safeBottom = screenHeight - dp(105)
+    private fun resetPendingBooking() {
+        waitingForConfirmation = false
+        confirmationPollsLeft = 0
+        pendingSlotName = "Unknown session"
+    }
 
-        val usable = preferredBounds
-            ?.takeIf {
-                !it.isEmpty &&
-                    it.width() > screenWidth * 0.35f &&
-                    it.height() > screenHeight * 0.15f
-            }
-            ?.let { Rect(it) }
-            ?: Rect(
-                (screenWidth * 0.08f).toInt(),
-                (screenHeight * 0.30f).toInt(),
-                (screenWidth * 0.92f).toInt(),
-                (screenHeight * 0.82f).toInt()
-            )
-
-        usable.top = usable.top.coerceAtLeast((screenHeight * 0.18f).toInt())
-        usable.bottom = usable.bottom.coerceAtMost(safeBottom)
-
-        fun randomOffset(maxOffsetPx: Int): Float =
-            Random.nextInt(-maxOffsetPx, maxOffsetPx + 1).toFloat()
-
-        val listAnchorBottom = findSessionListAnchorBottom(roots)
-        val horizontalPadding = dp(18).toFloat()
-        val topLimit = usable.top + dp(18).toFloat()
-        val bottomLimit = minOf(
-            usable.bottom - dp(18),
-            safeBottom
-        ).toFloat()
-        val usableHeight = (bottomLimit - topLimit).coerceAtLeast(0f)
-
-        val x = (
-            usable.centerX().toFloat() + randomOffset(150)
-        ).coerceIn(
-            usable.left + horizontalPadding,
-            usable.right - horizontalPadding
-        )
-
-        val desiredStartY = topLimit + usableHeight * 0.51f
-        val startRandomness = (usableHeight * 0.01f).toInt()
-        val startY = (
-            desiredStartY + randomOffset(startRandomness)
-        ).coerceIn(
-            topLimit + usableHeight * 0.50f,
-            bottomLimit - usableHeight * 0.42f
-        )
-
-        val baseSwipeDistance = usableHeight * 0.50f
-        val swipeRandomness = (usableHeight * 0.02f).toInt()
-        val swipeDistance = (
-            baseSwipeDistance + randomOffset(swipeRandomness)
-        ).coerceAtLeast(usableHeight * 0.42f)
-
-        val endY = (startY + swipeDistance).coerceAtMost(bottomLimit)
-
-        val targetPackage = roots
-            .mapNotNull { it.packageName?.toString() }
-            .firstOrNull { it != packageName }
-            ?: roots.firstOrNull()?.packageName?.toString()
-            ?: "Unknown"
-        BotRuntime.setActivePackage(this, targetPackage)
-
-        val anchorText = listAnchorBottom?.toString() ?: "none"
-        val gestureDescription =
-            "${startY.toInt()}→${endY.toInt()} anchor=$anchorText bounds=${usable.toShortString()} pkg=$targetPackage"
-
-        BotRuntime.setLastGesture(this, "Dispatched $gestureDescription")
-        BotRuntime.setStatus(this, "Dispatching refresh swipe")
-
-        val path = Path().apply {
-            moveTo(x, startY)
-            lineTo(x + dp(6), startY + (endY - startY) * 0.35f)
-            lineTo(x, endY)
-        }
-
-        val gesture = GestureDescription.Builder()
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    path,
-                    0L,
-                    REFRESH_GESTURE_DURATION_MS
-                )
-            )
-            .build()
-
-        val dispatched = dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescriptionResult: GestureDescription?) {
-                    BotRuntime.recordRefreshAttempt(this@SlotBotAccessibilityService)
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Completed at ${timeFormatter.format(Date())}: $gestureDescription"
-                    )
-                    BotRuntime.setStatus(
-                        this@SlotBotAccessibilityService,
-                        "Refresh swipe completed"
-                    )
-                    onFinished()
-                }
-
-                override fun onCancelled(gestureDescriptionResult: GestureDescription?) {
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Cancelled at ${timeFormatter.format(Date())}: $gestureDescription"
-                    )
-                    BotRuntime.setStatus(
-                        this@SlotBotAccessibilityService,
-                        "Refresh swipe cancelled"
-                    )
-                    handler.postDelayed({ onFinished() }, 400L)
-                }
-            },
-            handler
-        )
-
-        if (!dispatched) {
-            BotRuntime.setLastGesture(
-                this,
-                "dispatchGesture returned false: $gestureDescription"
-            )
-            BotRuntime.setStatus(this, "Android rejected refresh swipe")
-            handler.postDelayed({ onFinished() }, 400L)
-        }
+    private fun resetCycleState() {
+        resetPendingBooking()
+        cycleActive = false
+        cycleDays.clear()
+        currentDayIndex = null
+        BotRuntime.setActiveTargetDay(this, null)
     }
 
     private fun tapNodeByCoordinates(
@@ -623,29 +739,13 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        dispatchTapAt(
-            x = bounds.exactCenterX(),
-            y = bounds.exactCenterY(),
-            label = "$label bounds=${bounds.toShortString()}",
-            onCompleted = onCompleted,
-            onFailed = onFailed
-        )
-    }
+        val x = bounds.exactCenterX()
+        val y = bounds.exactCenterY()
+        val description = "$label at ${x.toInt()},${y.toInt()} bounds=${bounds.toShortString()}"
+        BotRuntime.setLastGesture(this, "Tap dispatched: $description")
 
-    private fun dispatchTapAt(
-        x: Float,
-        y: Float,
-        label: String,
-        onCompleted: () -> Unit,
-        onFailed: () -> Unit
-    ) {
-        val tapDescription = "$label at ${x.toInt()},${y.toInt()}"
-        BotRuntime.setLastGesture(this, "Tap dispatched: $tapDescription")
-
-        val path = Path().apply {
-            moveTo(x, y)
-        }
-        val tap = GestureDescription.Builder()
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
             .addStroke(
                 GestureDescription.StrokeDescription(
                     path,
@@ -656,20 +756,20 @@ class SlotBotAccessibilityService : AccessibilityService() {
             .build()
 
         val dispatched = dispatchGesture(
-            tap,
+            gesture,
             object : GestureResultCallback() {
-                override fun onCompleted(gestureDescriptionResult: GestureDescription?) {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
                     BotRuntime.setLastGesture(
                         this@SlotBotAccessibilityService,
-                        "Tap completed at ${timeFormatter.format(Date())}: $tapDescription"
+                        "Tap completed at ${timeFormatter.format(Date())}: $description"
                     )
                     onCompleted()
                 }
 
-                override fun onCancelled(gestureDescriptionResult: GestureDescription?) {
+                override fun onCancelled(gestureDescription: GestureDescription?) {
                     BotRuntime.setLastGesture(
                         this@SlotBotAccessibilityService,
-                        "Tap cancelled at ${timeFormatter.format(Date())}: $tapDescription"
+                        "Tap cancelled at ${timeFormatter.format(Date())}: $description"
                     )
                     onFailed()
                 }
@@ -678,7 +778,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         )
 
         if (!dispatched) {
-            BotRuntime.setLastGesture(this, "Tap rejected: $tapDescription")
+            BotRuntime.setLastGesture(this, "Tap rejected: $description")
             onFailed()
         }
     }
@@ -693,13 +793,12 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             val rootPackageName = root.packageName?.toString() ?: return@forEach
             val supportedByPackage = rootPackageName in SUPPORTED_PACKAGES
-            val supportedByScreenSignature = rootMatchesTargetSignature(root)
-            if (!supportedByPackage && !supportedByScreenSignature) return@forEach
+            val supportedBySignature = rootMatchesTargetSignature(root)
+            if (!supportedByPackage && !supportedBySignature) return@forEach
 
             val bounds = Rect()
             root.getBoundsInScreen(bounds)
-            val key = "$rootPackageName:${bounds.toShortString()}"
-            unique.putIfAbsent(key, root)
+            unique.putIfAbsent("$rootPackageName:${bounds.toShortString()}", root)
         }
 
         return unique.values.toList()
@@ -707,13 +806,12 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
     private fun rootMatchesTargetSignature(root: AccessibilityNodeInfo): Boolean {
         var score = 0
-
         walkTree(root) { node ->
             if (score >= 4 || !node.isVisibleToUser) return@walkTree
-
             labelsOf(node).forEach { label ->
                 score += when {
                     label.equals("Available sessions", ignoreCase = true) -> 2
+                    label.equals("AVAILABLE SESSIONS", ignoreCase = true) -> 2
                     label.equals("MY SESSIONS", ignoreCase = true) -> 1
                     label.startsWith("Applied filters", ignoreCase = true) -> 1
                     label.startsWith("Filters (", ignoreCase = true) -> 1
@@ -725,72 +823,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 }
             }
         }
-
         return score >= 3
-    }
-
-    private fun findSessionListAnchorBottom(
-        roots: List<AccessibilityNodeInfo>
-    ): Int? {
-        var anchorBottom = 0
-
-        roots.forEach { root ->
-            walkTree(root) { node ->
-                if (!node.isVisibleToUser) return@walkTree
-
-                val isAnchor = labelsOf(node).any { label ->
-                    label.startsWith("Applied filters", ignoreCase = true) ||
-                        label.equals("BEG WEST", ignoreCase = true) ||
-                        label.equals("BEG EAST", ignoreCase = true) ||
-                        FILTER_TIME_REGEX.matches(label)
-                }
-
-                if (isAnchor) {
-                    val bounds = Rect()
-                    node.getBoundsInScreen(bounds)
-                    if (!bounds.isEmpty) {
-                        anchorBottom = maxOf(anchorBottom, bounds.bottom)
-                    }
-                }
-            }
-        }
-
-        return anchorBottom.takeIf { it > 0 }
-    }
-
-    private fun findBestScrollableNode(
-        roots: List<AccessibilityNodeInfo>
-    ): AccessibilityNodeInfo? {
-        val metrics = resources.displayMetrics
-        val screenArea = metrics.widthPixels.toLong() * metrics.heightPixels.toLong()
-        var bestNode: AccessibilityNodeInfo? = null
-        var bestScore = 0L
-
-        roots.forEach { root ->
-            walkTree(root) { node ->
-                if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
-
-                val hasScrollAction = node.actionList.any {
-                    it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
-                        it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                }
-                if (!node.isScrollable && !hasScrollAction) return@walkTree
-
-                val bounds = Rect()
-                node.getBoundsInScreen(bounds)
-                if (bounds.isEmpty) return@walkTree
-
-                val area = bounds.width().toLong() * bounds.height().toLong()
-                if (area < screenArea / 12L) return@walkTree
-
-                if (area > bestScore) {
-                    bestScore = area
-                    bestNode = node
-                }
-            }
-        }
-
-        return bestNode
     }
 
     private fun findExactClickTargets(
@@ -824,12 +857,9 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots: List<AccessibilityNodeInfo>
     ): String {
         val labels = mutableListOf<String>()
-
         roots.forEach { root ->
             walkTree(root) { node ->
-                if (node.isVisibleToUser) {
-                    labels.addAll(labelsOf(node))
-                }
+                if (node.isVisibleToUser) labels.addAll(labelsOf(node))
             }
         }
 
@@ -860,13 +890,13 @@ class SlotBotAccessibilityService : AccessibilityService() {
                 candidate.getBoundsInScreen(bounds)
                 if (bounds.isEmpty) return@walkTree
 
-                val verticalDistance = abs(bounds.centerY() - buttonBounds.centerY())
+                val distance = abs(bounds.centerY() - buttonBounds.centerY())
                 labelsOf(candidate).forEach { label ->
                     if (
                         SESSION_TIME_REGEX.containsMatchIn(label) ||
                         AREA_REGEX.matches(label)
                     ) {
-                        candidates.add(verticalDistance to label)
+                        candidates.add(distance to label)
                     }
                 }
             }
@@ -905,7 +935,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         while (queue.isNotEmpty()) {
             val node = queue.removeFirst()
             visit(node)
-
             for (index in 0 until node.childCount) {
                 node.getChild(index)?.let(queue::addLast)
             }
@@ -962,20 +991,24 @@ class SlotBotAccessibilityService : AccessibilityService() {
         private const val SCAN_RETRY_DELAY_MS = 350L
         private const val REFRESH_SETTLE_MS = 1_400L
         private const val REFRESH_GESTURE_DURATION_MS = 850L
-        private const val MAX_SCROLL_TO_TOP_STEPS = 5
-        private const val SCROLL_TO_TOP_SETTLE_MS = 250L
 
         private const val TAP_DURATION_MS = 120L
         private const val CONFIRMATION_POLL_DELAY_MS = 350L
         private const val MAX_CONFIRMATION_POLLS = 12
         private const val FAILED_BOOK_COOLDOWN_MS = 1_000L
         private const val POST_CONFIRM_SETTLE_MS = 1_000L
-        private const val DAY_SWITCH_SETTLE_MS = 850L
-        private const val CALENDAR_RETRY_MS = 900L
+
+        private const val DAY_SWITCH_SETTLE_MS = 500L
+        private const val CALENDAR_CONTINUE_DELAY_MS = 350L
+        private const val CALENDAR_RETRY_MS = 700L
+        private const val MAX_CALENDAR_TAP_RETRIES = 2
 
         private const val CALENDAR_FIRST_DAY_X_RATIO = 0.094f
         private const val CALENDAR_LAST_DAY_X_RATIO = 0.906f
-        private const val CALENDAR_DATE_Y_RATIO = 0.315f
+        private const val CALENDAR_DATE_Y_TO_WIDTH_RATIO = 0.70f
+
+        private const val REFRESH_START_Y_TO_WIDTH_RATIO = 1.30f
+        private const val REFRESH_DISTANCE_TO_WIDTH_RATIO = 0.51f
 
         private val SUPPORTED_PACKAGES = setOf(
             "com.logistics.rider.glovo",
@@ -983,9 +1016,27 @@ class SlotBotAccessibilityService : AccessibilityService() {
             "com.glovoapp.rider"
         )
 
-        private val FILTER_TIME_REGEX = Regex(
-            """^\d{1,2}:\d{2}-\d{1,2}:\d{2}$"""
+        private val WEEKDAY_NODE_LABELS = listOf(
+            setOf("M", "Mo", "Mon"),
+            setOf("Tu", "Tue"),
+            setOf("W", "We", "Wed"),
+            setOf("Th", "Thu"),
+            setOf("F", "Fr", "Fri"),
+            setOf("Sa", "Sat"),
+            setOf("Su", "Sun")
         )
+
+        private val FULL_WEEKDAY_NAMES = listOf(
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday"
+        )
+
+        private val DAY_NUMBER_REGEX = Regex("""^(0?[1-9]|[12]\d|3[01])$""")
 
         private val SESSION_TIME_REGEX = Regex(
             """\b\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}(?:\s*\(\d+h\))?"""
