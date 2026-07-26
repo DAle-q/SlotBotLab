@@ -16,13 +16,6 @@ import kotlin.random.Random
 
 class SlotBotAccessibilityService : AccessibilityService() {
 
-    private data class CalendarCandidate(
-        val x: Float,
-        val y: Float,
-        val text: String,
-        val bounds: Rect
-    )
-
     private val handler = Handler(Looper.getMainLooper())
     private var loopScheduled = false
     private val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -67,7 +60,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
                     this@SlotBotAccessibilityService,
                     "Waiting for ${timeFormatter.format(Date(nextRefreshAt))}"
                 )
-                handler.postDelayed(this, minOf(SCHEDULE_HEARTBEAT_MS, nextRefreshAt - now))
+                handler.postDelayed(
+                    this,
+                    minOf(SCHEDULE_HEARTBEAT_MS, nextRefreshAt - now)
+                )
                 return
             }
 
@@ -162,7 +158,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
         BotRuntime.setStatus(
             this,
-            "Starting weekday cycle: ${requestedDays.joinToString { BotRuntime.dayLabels[it] }}"
+            "Starting cycle: ${requestedDays.joinToString { BotRuntime.dayLabels[it] }}"
         )
         selectNextRequestedDay()
     }
@@ -215,38 +211,42 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     private fun switchToDay(dayIndex: Int, onSelected: () -> Unit) {
-        val roots = supportedRoots()
-        if (roots.isEmpty()) {
-            BotRuntime.setStatus(this, "Cannot find calendar while selecting a day")
-            handler.postDelayed({ selectNextRequestedDay() }, OUTSIDE_SUPPORTED_APP_RECHECK_MS)
+        if (dayIndex !in BotRuntime.dayLabels.indices) {
+            selectNextRequestedDay()
             return
         }
 
-        val points = findCalendarDayPoints(roots)
-        if (points.size < 7) {
-            BotRuntime.setStatus(
-                this,
-                "Calendar day row not detected (${points.size}/7)"
-            )
-            handler.postDelayed({ switchToDay(dayIndex, onSelected) }, CALENDAR_RETRY_MS)
-            return
-        }
+        val metrics = resources.displayMetrics
+        val screenWidth = metrics.widthPixels.toFloat()
+        val screenHeight = metrics.heightPixels.toFloat()
 
-        val target = points[dayIndex]
-        val label = "${BotRuntime.dayLabels[dayIndex]} ${target.text}"
+        // Glovo lays out the seven calendar cells evenly from Monday to Sunday.
+        // These ratios match the real 1080x2400 Samsung layout and scale to other screens.
+        val firstDayX = screenWidth * CALENDAR_FIRST_DAY_X_RATIO
+        val lastDayX = screenWidth * CALENDAR_LAST_DAY_X_RATIO
+        val stepX = (lastDayX - firstDayX) / 6f
+        val x = firstDayX + stepX * dayIndex
+        val y = screenHeight * CALENDAR_DATE_Y_RATIO
+        val label = BotRuntime.dayLabels[dayIndex]
+
         BotRuntime.setStatus(this, "Selecting $label")
-
         dispatchTapAt(
-            x = target.x,
-            y = target.y,
+            x = x,
+            y = y,
             label = "calendar $label",
             onCompleted = {
-                BotRuntime.setStatus(this, "Selected $label")
+                BotRuntime.setStatus(
+                    this,
+                    "Selected $label at ${x.toInt()},${y.toInt()}"
+                )
                 handler.postDelayed(onSelected, DAY_SWITCH_SETTLE_MS)
             },
             onFailed = {
                 BotRuntime.setStatus(this, "Calendar tap failed for $label")
-                handler.postDelayed({ switchToDay(dayIndex, onSelected) }, CALENDAR_RETRY_MS)
+                handler.postDelayed(
+                    { switchToDay(dayIndex, onSelected) },
+                    CALENDAR_RETRY_MS
+                )
             }
         )
     }
@@ -435,85 +435,15 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val delayMs = Random.nextLong(MIN_REFRESH_INTERVAL_MS, MAX_REFRESH_INTERVAL_MS + 1L)
+        val delayMs = Random.nextLong(
+            MIN_REFRESH_INTERVAL_MS,
+            MAX_REFRESH_INTERVAL_MS + 1L
+        )
         val next = System.currentTimeMillis() + delayMs
 
         BotRuntime.setNextRefreshAt(this, next)
         BotRuntime.setStatus(this, "Next multi-day cycle at ${timeFormatter.format(Date(next))}")
         handler.postDelayed(loop, SCHEDULE_HEARTBEAT_MS)
-    }
-
-    private fun findCalendarDayPoints(roots: List<AccessibilityNodeInfo>): List<CalendarCandidate> {
-        val metrics = resources.displayMetrics
-        val screenWidth = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
-        val candidatesByBounds = linkedMapOf<String, CalendarCandidate>()
-
-        roots.forEach { root ->
-            walkTree(root) { node ->
-                if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
-
-                val label = node.text?.toString()?.trim() ?: return@walkTree
-                if (!DAY_NUMBER_REGEX.matches(label)) return@walkTree
-
-                val bounds = Rect()
-                node.getBoundsInScreen(bounds)
-                if (bounds.isEmpty) return@walkTree
-                if (bounds.centerY() < screenHeight * 0.12f) return@walkTree
-                if (bounds.centerY() > screenHeight * 0.48f) return@walkTree
-                if (bounds.width() > screenWidth * 0.25f) return@walkTree
-
-                candidatesByBounds.putIfAbsent(
-                    bounds.toShortString(),
-                    CalendarCandidate(
-                        x = bounds.exactCenterX(),
-                        y = bounds.exactCenterY(),
-                        text = label,
-                        bounds = Rect(bounds)
-                    )
-                )
-            }
-        }
-
-        val candidates = candidatesByBounds.values.toList()
-        if (candidates.isEmpty()) return emptyList()
-
-        var bestRow = emptyList<CalendarCandidate>()
-        candidates.forEach { anchor ->
-            val row = candidates
-                .filter { abs(it.y - anchor.y) <= dp(38) }
-                .sortedBy { it.x }
-                .fold(mutableListOf<CalendarCandidate>()) { acc, candidate ->
-                    if (acc.none { abs(it.x - candidate.x) < dp(24) }) {
-                        acc.add(candidate)
-                    }
-                    acc
-                }
-
-            val rowSpan = if (row.size >= 2) row.last().x - row.first().x else 0f
-            val bestSpan = if (bestRow.size >= 2) bestRow.last().x - bestRow.first().x else 0f
-            if (row.size > bestRow.size || (row.size == bestRow.size && rowSpan > bestSpan)) {
-                bestRow = row
-            }
-        }
-
-        if (bestRow.size < 5) return emptyList()
-
-        val rowY = bestRow.map { it.y }.average().toFloat()
-        val detected = bestRow.sortedBy { it.x }
-
-        if (detected.size == 7) return detected
-
-        return BotRuntime.dayLabels.indices.map { index ->
-            val x = screenWidth * ((index + 0.5f) / 7f)
-            val nearest = detected.minByOrNull { abs(it.x - x) }
-            CalendarCandidate(
-                x = x,
-                y = rowY,
-                text = nearest?.text ?: "?",
-                bounds = nearest?.bounds ?: Rect()
-            )
-        }
     }
 
     private fun scrollToTopThenRefresh(
@@ -536,8 +466,14 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val scrollableBounds = scrollable?.let { Rect().also(it::getBoundsInScreen) }
-        performPullToRefresh(roots, scrollableBounds, onFinished)
+        val scrollableBounds = scrollable?.let {
+            Rect().also(it::getBoundsInScreen)
+        }
+        performPullToRefresh(
+            roots = roots,
+            preferredBounds = scrollableBounds,
+            onFinished = onFinished
+        )
     }
 
     private fun performPullToRefresh(
@@ -573,7 +509,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val listAnchorBottom = findSessionListAnchorBottom(roots)
         val horizontalPadding = dp(18).toFloat()
         val topLimit = usable.top + dp(18).toFloat()
-        val bottomLimit = minOf(usable.bottom - dp(18), safeBottom).toFloat()
+        val bottomLimit = minOf(
+            usable.bottom - dp(18),
+            safeBottom
+        ).toFloat()
         val usableHeight = (bottomLimit - topLimit).coerceAtLeast(0f)
 
         val x = (
@@ -639,7 +578,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
                         this@SlotBotAccessibilityService,
                         "Completed at ${timeFormatter.format(Date())}: $gestureDescription"
                     )
-                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh swipe completed")
+                    BotRuntime.setStatus(
+                        this@SlotBotAccessibilityService,
+                        "Refresh swipe completed"
+                    )
                     onFinished()
                 }
 
@@ -648,7 +590,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
                         this@SlotBotAccessibilityService,
                         "Cancelled at ${timeFormatter.format(Date())}: $gestureDescription"
                     )
-                    BotRuntime.setStatus(this@SlotBotAccessibilityService, "Refresh swipe cancelled")
+                    BotRuntime.setStatus(
+                        this@SlotBotAccessibilityService,
+                        "Refresh swipe cancelled"
+                    )
                     handler.postDelayed({ onFinished() }, 400L)
                 }
             },
@@ -656,7 +601,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
         )
 
         if (!dispatched) {
-            BotRuntime.setLastGesture(this, "dispatchGesture returned false: $gestureDescription")
+            BotRuntime.setLastGesture(
+                this,
+                "dispatchGesture returned false: $gestureDescription"
+            )
             BotRuntime.setStatus(this, "Android rejected refresh swipe")
             handler.postDelayed({ onFinished() }, 400L)
         }
@@ -694,7 +642,9 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val tapDescription = "$label at ${x.toInt()},${y.toInt()}"
         BotRuntime.setLastGesture(this, "Tap dispatched: $tapDescription")
 
-        val path = Path().apply { moveTo(x, y) }
+        val path = Path().apply {
+            moveTo(x, y)
+        }
         val tap = GestureDescription.Builder()
             .addStroke(
                 GestureDescription.StrokeDescription(
@@ -748,7 +698,8 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
             val bounds = Rect()
             root.getBoundsInScreen(bounds)
-            unique.putIfAbsent("$rootPackageName:${bounds.toShortString()}", root)
+            val key = "$rootPackageName:${bounds.toShortString()}"
+            unique.putIfAbsent(key, root)
         }
 
         return unique.values.toList()
@@ -778,28 +729,38 @@ class SlotBotAccessibilityService : AccessibilityService() {
         return score >= 3
     }
 
-    private fun findSessionListAnchorBottom(roots: List<AccessibilityNodeInfo>): Int? {
+    private fun findSessionListAnchorBottom(
+        roots: List<AccessibilityNodeInfo>
+    ): Int? {
         var anchorBottom = 0
+
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser) return@walkTree
+
                 val isAnchor = labelsOf(node).any { label ->
                     label.startsWith("Applied filters", ignoreCase = true) ||
                         label.equals("BEG WEST", ignoreCase = true) ||
                         label.equals("BEG EAST", ignoreCase = true) ||
                         FILTER_TIME_REGEX.matches(label)
                 }
+
                 if (isAnchor) {
                     val bounds = Rect()
                     node.getBoundsInScreen(bounds)
-                    if (!bounds.isEmpty) anchorBottom = maxOf(anchorBottom, bounds.bottom)
+                    if (!bounds.isEmpty) {
+                        anchorBottom = maxOf(anchorBottom, bounds.bottom)
+                    }
                 }
             }
         }
+
         return anchorBottom.takeIf { it > 0 }
     }
 
-    private fun findBestScrollableNode(roots: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+    private fun findBestScrollableNode(
+        roots: List<AccessibilityNodeInfo>
+    ): AccessibilityNodeInfo? {
         val metrics = resources.displayMetrics
         val screenArea = metrics.widthPixels.toLong() * metrics.heightPixels.toLong()
         var bestNode: AccessibilityNodeInfo? = null
@@ -808,6 +769,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
+
                 val hasScrollAction = node.actionList.any {
                     it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
                         it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
@@ -820,12 +782,14 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
                 val area = bounds.width().toLong() * bounds.height().toLong()
                 if (area < screenArea / 12L) return@walkTree
+
                 if (area > bestScore) {
                     bestScore = area
                     bestNode = node
                 }
             }
         }
+
         return bestNode
     }
 
@@ -838,12 +802,16 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             walkTree(root) { node ->
                 if (!node.isVisibleToUser || !node.isEnabled) return@walkTree
-                if (labelsOf(node).none { it.equals(exactLabel, ignoreCase = true) }) return@walkTree
+                if (labelsOf(node).none { it.equals(exactLabel, ignoreCase = true) }) {
+                    return@walkTree
+                }
 
                 val target = findClickableAncestor(node) ?: node
                 val bounds = Rect()
                 target.getBoundsInScreen(bounds)
-                if (!bounds.isEmpty) uniqueTargets.putIfAbsent(bounds.toShortString(), target)
+                if (!bounds.isEmpty) {
+                    uniqueTargets.putIfAbsent(bounds.toShortString(), target)
+                }
             }
         }
 
@@ -852,21 +820,33 @@ class SlotBotAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun extractSessionDescriptor(roots: List<AccessibilityNodeInfo>): String {
+    private fun extractSessionDescriptor(
+        roots: List<AccessibilityNodeInfo>
+    ): String {
         val labels = mutableListOf<String>()
+
         roots.forEach { root ->
             walkTree(root) { node ->
-                if (node.isVisibleToUser) labels.addAll(labelsOf(node))
+                if (node.isVisibleToUser) {
+                    labels.addAll(labelsOf(node))
+                }
             }
         }
 
-        val time = labels.firstNotNullOfOrNull { SESSION_TIME_REGEX.find(it)?.value }
+        val time = labels.firstNotNullOfOrNull {
+            SESSION_TIME_REGEX.find(it)?.value
+        }
         val area = labels.firstOrNull { AREA_REGEX.matches(it) }
-        return listOfNotNull(time, area).distinct().joinToString(" | ")
+
+        return listOfNotNull(time, area)
+            .distinct()
+            .joinToString(" | ")
             .ifBlank { "Unknown session" }
     }
 
-    private fun extractSessionDescriptorNearNode(node: AccessibilityNodeInfo): String {
+    private fun extractSessionDescriptorNearNode(
+        node: AccessibilityNodeInfo
+    ): String {
         val buttonBounds = Rect()
         node.getBoundsInScreen(buttonBounds)
         val roots = supportedRoots()
@@ -875,13 +855,17 @@ class SlotBotAccessibilityService : AccessibilityService() {
         roots.forEach { root ->
             walkTree(root) { candidate ->
                 if (!candidate.isVisibleToUser) return@walkTree
+
                 val bounds = Rect()
                 candidate.getBoundsInScreen(bounds)
                 if (bounds.isEmpty) return@walkTree
 
                 val verticalDistance = abs(bounds.centerY() - buttonBounds.centerY())
                 labelsOf(candidate).forEach { label ->
-                    if (SESSION_TIME_REGEX.containsMatchIn(label) || AREA_REGEX.matches(label)) {
+                    if (
+                        SESSION_TIME_REGEX.containsMatchIn(label) ||
+                        AREA_REGEX.matches(label)
+                    ) {
                         candidates.add(verticalDistance to label)
                     }
                 }
@@ -893,12 +877,15 @@ class SlotBotAccessibilityService : AccessibilityService() {
             .minByOrNull { it.first }
             ?.second
             ?.let { SESSION_TIME_REGEX.find(it)?.value }
+
         val area = candidates
             .filter { AREA_REGEX.matches(it.second) }
             .minByOrNull { it.first }
             ?.second
 
-        return listOfNotNull(time, area).distinct().joinToString(" | ")
+        return listOfNotNull(time, area)
+            .distinct()
+            .joinToString(" | ")
             .ifBlank { "Unknown session" }
     }
 
@@ -914,22 +901,28 @@ class SlotBotAccessibilityService : AccessibilityService() {
     ) {
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
+
         while (queue.isNotEmpty()) {
             val node = queue.removeFirst()
             visit(node)
+
             for (index in 0 until node.childCount) {
                 node.getChild(index)?.let(queue::addLast)
             }
         }
     }
 
-    private fun findClickableAncestor(startNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    private fun findClickableAncestor(
+        startNode: AccessibilityNodeInfo
+    ): AccessibilityNodeInfo? {
         var node: AccessibilityNodeInfo? = startNode
+
         repeat(10) {
             val current = node ?: return null
             val hasClickAction = current.actionList.any {
                 it.id == AccessibilityNodeInfo.ACTION_CLICK
             }
+
             if (
                 current.isEnabled &&
                 current.isVisibleToUser &&
@@ -937,8 +930,10 @@ class SlotBotAccessibilityService : AccessibilityService() {
             ) {
                 return current
             }
+
             node = current.parent
         }
+
         return null
     }
 
@@ -975,16 +970,18 @@ class SlotBotAccessibilityService : AccessibilityService() {
         private const val MAX_CONFIRMATION_POLLS = 12
         private const val FAILED_BOOK_COOLDOWN_MS = 1_000L
         private const val POST_CONFIRM_SETTLE_MS = 1_000L
-        private const val DAY_SWITCH_SETTLE_MS = 650L
+        private const val DAY_SWITCH_SETTLE_MS = 850L
         private const val CALENDAR_RETRY_MS = 900L
+
+        private const val CALENDAR_FIRST_DAY_X_RATIO = 0.094f
+        private const val CALENDAR_LAST_DAY_X_RATIO = 0.906f
+        private const val CALENDAR_DATE_Y_RATIO = 0.315f
 
         private val SUPPORTED_PACKAGES = setOf(
             "com.logistics.rider.glovo",
             "com.glovoapp.courier",
             "com.glovoapp.rider"
         )
-
-        private val DAY_NUMBER_REGEX = Regex("""^(0?[1-9]|[12]\d|3[01])$""")
 
         private val FILTER_TIME_REGEX = Regex(
             """^\d{1,2}:\d{2}-\d{1,2}:\d{2}$"""
