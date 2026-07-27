@@ -29,11 +29,15 @@ class FloatingBotControlService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var toggleButton: Button? = null
+    private var nightButton: Button? = null
+
+    private var blackScreenView: View? = null
+    private var blackScreenExitView: View? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val refreshUi = object : Runnable {
         override fun run() {
-            updateToggleButton()
+            updateButtons()
             handler.postDelayed(this, 300L)
         }
     }
@@ -67,6 +71,10 @@ class FloatingBotControlService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_EXIT_BLACK_SCREEN -> hideBlackScreen()
+        }
+
         if (overlayView == null && Settings.canDrawOverlays(this)) {
             runCatching { showOverlay() }
                 .onSuccess { setActiveState(true) }
@@ -79,6 +87,7 @@ class FloatingBotControlService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        hideBlackScreen()
 
         val manager = windowManager
         val view = overlayView
@@ -88,6 +97,7 @@ class FloatingBotControlService : Service() {
 
         overlayView = null
         toggleButton = null
+        nightButton = null
         setActiveState(false)
         super.onDestroy()
     }
@@ -113,16 +123,12 @@ class FloatingBotControlService : Service() {
             setPadding(dp(8), 0, dp(8), 0)
         }
 
-        val toggle = Button(this).apply {
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(dp(14), dp(7), dp(14), dp(7))
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            background = roundedBackground(Color.rgb(0, 140, 115), 22f)
+        val toggle = compactButton(
+            text = "Start",
+            textSize = 14f,
+            backgroundColor = Color.rgb(0, 140, 115),
+            horizontalPadding = 14
+        ).apply {
             setOnClickListener {
                 val nextRunning = !BotRuntime.isRunning(this@FloatingBotControlService)
                 BotRuntime.setRunning(this@FloatingBotControlService, nextRunning)
@@ -132,51 +138,52 @@ class FloatingBotControlService : Service() {
                     SlotBotAccessibilityService.wakeForManualRefresh()
                 }
 
-                updateToggleButton()
+                updateButtons()
             }
         }
         toggleButton = toggle
 
-        val refresh = Button(this).apply {
-            text = "↻"
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(dp(11), dp(7), dp(11), dp(7))
-            textSize = 19f
-            setTextColor(Color.WHITE)
-            background = roundedBackground(Color.rgb(70, 91, 120), 22f)
+        val refresh = compactButton(
+            text = "↻",
+            textSize = 19f,
+            backgroundColor = Color.rgb(70, 91, 120),
+            horizontalPadding = 11
+        ).apply {
             setOnClickListener {
                 BotRuntime.setRunning(this@FloatingBotControlService, true)
                 BotRuntime.requestImmediateRefresh(this@FloatingBotControlService)
                 SlotBotAccessibilityService.wakeForManualRefresh()
-                updateToggleButton()
+                updateButtons()
             }
         }
 
-        val close = Button(this).apply {
-            text = "×"
-            isAllCaps = false
-            minWidth = 0
-            minimumWidth = 0
-            minHeight = 0
-            minimumHeight = 0
-            setPadding(dp(12), dp(7), dp(12), dp(7))
-            textSize = 19f
-            setTextColor(Color.WHITE)
-            background = roundedBackground(Color.rgb(73, 76, 80), 22f)
+        val night = compactButton(
+            text = "●",
+            textSize = 17f,
+            backgroundColor = Color.rgb(45, 48, 54),
+            horizontalPadding = 11
+        ).apply {
+            contentDescription = "Black screen"
+            setOnClickListener {
+                if (blackScreenView == null) showBlackScreen() else hideBlackScreen()
+                updateButtons()
+            }
+        }
+        nightButton = night
+
+        val close = compactButton(
+            text = "×",
+            textSize = 19f,
+            backgroundColor = Color.rgb(73, 76, 80),
+            horizontalPadding = 12
+        ).apply {
             setOnClickListener {
                 BotRuntime.setRunning(this@FloatingBotControlService, false)
                 stopSelf()
             }
         }
 
-        container.addView(
-            dragHandle,
-            LinearLayout.LayoutParams(dp(42), dp(44))
-        )
+        container.addView(dragHandle, LinearLayout.LayoutParams(dp(42), dp(44)))
         container.addView(
             toggle,
             LinearLayout.LayoutParams(
@@ -186,14 +193,13 @@ class FloatingBotControlService : Service() {
         )
         container.addView(
             refresh,
-            LinearLayout.LayoutParams(dp(48), dp(44)).apply {
-                marginEnd = dp(6)
-            }
+            LinearLayout.LayoutParams(dp(48), dp(44)).apply { marginEnd = dp(6) }
         )
         container.addView(
-            close,
-            LinearLayout.LayoutParams(dp(46), dp(44))
+            night,
+            LinearLayout.LayoutParams(dp(48), dp(44)).apply { marginEnd = dp(6) }
         )
+        container.addView(close, LinearLayout.LayoutParams(dp(46), dp(44)))
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -211,7 +217,111 @@ class FloatingBotControlService : Service() {
         dragHandle.setOnTouchListener(DragTouchListener(params))
         manager.addView(container, params)
         overlayView = container
-        updateToggleButton()
+        updateButtons()
+    }
+
+    /**
+     * Adds a nearly opaque black OLED-saving layer. Android 12+ blocks pass-through touches
+     * through an untrusted application overlay when its opacity is above 0.8, so the window
+     * alpha is intentionally kept just below that limit. The view itself is not touchable,
+     * therefore Accessibility gestures continue to reach Glovo underneath it.
+     */
+    private fun showBlackScreen() {
+        if (blackScreenView != null) return
+        val manager = windowManager ?: return
+
+        val blackView = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            contentDescription = "SlotBot black screen"
+        }
+
+        val blackParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+            PixelFormat.OPAQUE
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            alpha = BLACK_SCREEN_ALPHA
+        }
+
+        val exitButton = compactButton(
+            text = "☀",
+            textSize = 20f,
+            backgroundColor = Color.rgb(40, 40, 40),
+            horizontalPadding = 12
+        ).apply {
+            contentDescription = "Exit black screen"
+            setOnClickListener { hideBlackScreen() }
+        }
+
+        val exitParams = WindowManager.LayoutParams(
+            dp(54),
+            dp(48),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(14)
+            y = dp(52)
+        }
+
+        runCatching {
+            manager.addView(blackView, blackParams)
+            blackScreenView = blackView
+
+            // Added afterwards so the exit button always stays above the black layer.
+            manager.addView(exitButton, exitParams)
+            blackScreenExitView = exitButton
+
+            BotRuntime.setStatus(this, "Black screen active")
+            updateNotification()
+        }.onFailure {
+            runCatching { manager.removeView(blackView) }
+            runCatching { manager.removeView(exitButton) }
+            blackScreenView = null
+            blackScreenExitView = null
+            BotRuntime.setStatus(this, "Could not enable black screen")
+        }
+    }
+
+    private fun hideBlackScreen() {
+        val manager = windowManager
+        blackScreenExitView?.let { view ->
+            if (manager != null) runCatching { manager.removeView(view) }
+        }
+        blackScreenView?.let { view ->
+            if (manager != null) runCatching { manager.removeView(view) }
+        }
+
+        blackScreenExitView = null
+        blackScreenView = null
+        updateButtons()
+        updateNotification()
+    }
+
+    private fun compactButton(
+        text: String,
+        textSize: Float,
+        backgroundColor: Int,
+        horizontalPadding: Int
+    ) = Button(this).apply {
+        this.text = text
+        isAllCaps = false
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = 0
+        minimumHeight = 0
+        setPadding(dp(horizontalPadding), dp(7), dp(horizontalPadding), dp(7))
+        this.textSize = textSize
+        setTextColor(Color.WHITE)
+        background = roundedBackground(backgroundColor, 22f)
     }
 
     private fun setActiveState(active: Boolean) {
@@ -219,12 +329,20 @@ class FloatingBotControlService : Service() {
         BotRuntime.setOverlayVisible(this, active)
     }
 
-    private fun updateToggleButton() {
+    private fun updateButtons() {
         val running = BotRuntime.isRunning(this)
         toggleButton?.apply {
             text = if (running) "Pause" else "Start"
             background = roundedBackground(
                 if (running) Color.rgb(181, 72, 72) else Color.rgb(0, 140, 115),
+                22f
+            )
+        }
+
+        nightButton?.apply {
+            text = if (blackScreenView == null) "●" else "☀"
+            background = roundedBackground(
+                if (blackScreenView == null) Color.rgb(45, 48, 54) else Color.rgb(105, 88, 35),
                 22f
             )
         }
@@ -266,7 +384,13 @@ class FloatingBotControlService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
         .setContentTitle("SlotBot floating controls")
-        .setContentText("Start, pause, refresh, or close SlotBot")
+        .setContentText(
+            if (blackScreenView == null) {
+                "Start, pause, refresh, black screen, or close SlotBot"
+            } else {
+                "Black screen active - tap action to exit"
+            }
+        )
         .setOngoing(true)
         .setPriority(NotificationCompat.PRIORITY_LOW)
         .setContentIntent(
@@ -277,7 +401,23 @@ class FloatingBotControlService : Service() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
         )
+        .addAction(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "Exit black screen",
+            PendingIntent.getService(
+                this,
+                1,
+                Intent(this, FloatingBotControlService::class.java)
+                    .setAction(ACTION_EXIT_BLACK_SCREEN),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        )
         .build()
+
+    private fun updateNotification() {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification())
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -308,5 +448,10 @@ class FloatingBotControlService : Service() {
 
         private const val CHANNEL_ID = "slotbot_overlay"
         private const val NOTIFICATION_ID = 4102
+        private const val ACTION_EXIT_BLACK_SCREEN =
+            "com.example.slotbotlab.action.EXIT_BLACK_SCREEN"
+
+        // Android's maximum pass-through obscuring opacity is 0.8 on Android 12+.
+        private const val BLACK_SCREEN_ALPHA = 0.79f
     }
 }
