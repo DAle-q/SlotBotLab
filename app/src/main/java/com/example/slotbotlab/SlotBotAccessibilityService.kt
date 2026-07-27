@@ -136,8 +136,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
     }
 
     private fun wakeImmediately() {
-        // Do not clear every Handler callback here. Doing so can remove a gesture callback
-        // while Android is still completing it. Only restart the scheduler loop.
         handler.removeCallbacks(loop)
         resetCycleState()
         BotRuntime.setNextRefreshAt(this, 0L)
@@ -145,14 +143,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         handler.post(loop)
     }
 
-    /**
-     * One cycle is deliberately ordered as:
-     * 1. refresh the currently open Available sessions page;
-     * 2. visit each requested weekday without refreshing again;
-     * 3. schedule the next cycle.
-     *
-     * Refresh therefore cannot be blocked by a calendar-tap failure.
-     */
     private fun beginCycle() {
         val requestedDays = BotRuntime.requestedDayIndices(this)
         if (requestedDays.isEmpty()) {
@@ -209,7 +199,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
             onReady = {
                 handler.postDelayed(
                     { scanCurrentDay(attempt = 0) },
-                    DAY_SWITCH_SETTLE_MS
+                    randomDelayMs(DAY_SWITCH_SETTLE_MIN_MS, DAY_SWITCH_SETTLE_MAX_MS)
                 )
             }
         )
@@ -243,7 +233,7 @@ class SlotBotAccessibilityService : AccessibilityService() {
 
         BotRuntime.setStatus(
             this,
-            "Selecting $label at ${point.x.toInt()},${point.y.toInt()} (${point.source})"
+            "Selecting $label near ${point.x.toInt()},${point.y.toInt()} (${point.source})"
         )
 
         dispatchCalendarTap(
@@ -278,9 +268,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val firstX = width * CALENDAR_FIRST_DAY_X_RATIO
         val lastX = width * CALENDAR_LAST_DAY_X_RATIO
         val x = firstX + ((lastX - firstX) / 6f) * dayIndex
-
-        // The vertical calendar position scales much more reliably from screen width than
-        // from height because Samsung reports a content height that excludes system bars.
         val y = (width * CALENDAR_DATE_Y_TO_WIDTH_RATIO)
             .coerceIn(height * 0.25f, height * 0.42f)
 
@@ -386,10 +373,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Calendar switching must never block the state machine just because Android omits a
-     * GestureResultCallback. Once dispatchGesture accepts the tap, continue after a safe delay.
-     */
     private fun dispatchCalendarTap(
         x: Float,
         y: Float,
@@ -397,46 +380,71 @@ class SlotBotAccessibilityService : AccessibilityService() {
         onAccepted: () -> Unit,
         onRejected: () -> Unit
     ) {
-        val description = "calendar $label at ${x.toInt()},${y.toInt()}"
-        val path = Path().apply { moveTo(x, y) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    path,
-                    0L,
-                    TAP_DURATION_MS
+        val point = randomizedPointAround(
+            x = x,
+            y = y,
+            maxXJitterDp = CALENDAR_TAP_JITTER_X_DP,
+            maxYJitterDp = CALENDAR_TAP_JITTER_Y_DP
+        )
+        val preTapDelay = randomDelayMs(
+            CALENDAR_PRE_TAP_DELAY_MIN_MS,
+            CALENDAR_PRE_TAP_DELAY_MAX_MS
+        )
+        val tapDuration = randomDelayMs(TAP_DURATION_MIN_MS, TAP_DURATION_MAX_MS)
+        val description =
+            "calendar $label at ${point.x.toInt()},${point.y.toInt()} delay=${preTapDelay}ms"
+
+        BotRuntime.setLastGesture(this, "Queued $description")
+
+        handler.postDelayed({
+            if (!BotRuntime.isRunning(this)) return@postDelayed
+
+            val path = Path().apply { moveTo(point.x, point.y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(
+                    GestureDescription.StrokeDescription(
+                        path,
+                        0L,
+                        tapDuration
+                    )
+                )
+                .build()
+
+            val dispatched = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        BotRuntime.setLastGesture(
+                            this@SlotBotAccessibilityService,
+                            "Completed at ${timeFormatter.format(Date())}: $description"
+                        )
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        BotRuntime.setLastGesture(
+                            this@SlotBotAccessibilityService,
+                            "Cancelled at ${timeFormatter.format(Date())}: $description"
+                        )
+                    }
+                },
+                handler
+            )
+
+            if (!dispatched) {
+                BotRuntime.setLastGesture(this, "Android rejected $description")
+                onRejected()
+                return@postDelayed
+            }
+
+            BotRuntime.setLastGesture(this, "Dispatched $description")
+            handler.postDelayed(
+                { onAccepted() },
+                randomDelayMs(
+                    CALENDAR_CONTINUE_DELAY_MIN_MS,
+                    CALENDAR_CONTINUE_DELAY_MAX_MS
                 )
             )
-            .build()
-
-        val dispatched = dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Completed at ${timeFormatter.format(Date())}: $description"
-                    )
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Cancelled at ${timeFormatter.format(Date())}: $description"
-                    )
-                }
-            },
-            handler
-        )
-
-        if (!dispatched) {
-            BotRuntime.setLastGesture(this, "Android rejected $description")
-            onRejected()
-            return
-        }
-
-        BotRuntime.setLastGesture(this, "Dispatched $description")
-        handler.postDelayed({ onAccepted() }, CALENDAR_CONTINUE_DELAY_MS)
+        }, preTapDelay)
     }
 
     private fun scanCurrentDay(attempt: Int) {
@@ -615,9 +623,6 @@ class SlotBotAccessibilityService : AccessibilityService() {
         val width = metrics.widthPixels.toFloat()
         val height = metrics.heightPixels.toFloat()
 
-        // Known-good Samsung gesture: approximately (540,1400) -> (540,1950)
-        // on a 1080x2400 device. Scaling from width keeps it stable when Android reports
-        // a content height that excludes status/navigation bars.
         val x = width * 0.50f
         val startY = (width * REFRESH_START_Y_TO_WIDTH_RATIO)
             .coerceAtMost(height - dp(220))
@@ -739,48 +744,108 @@ class SlotBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val x = bounds.exactCenterX()
-        val y = bounds.exactCenterY()
-        val description = "$label at ${x.toInt()},${y.toInt()} bounds=${bounds.toShortString()}"
-        BotRuntime.setLastGesture(this, "Tap dispatched: $description")
-
-        val path = Path().apply { moveTo(x, y) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    path,
-                    0L,
-                    TAP_DURATION_MS
-                )
-            )
-            .build()
-
-        val dispatched = dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Tap completed at ${timeFormatter.format(Date())}: $description"
-                    )
-                    onCompleted()
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    BotRuntime.setLastGesture(
-                        this@SlotBotAccessibilityService,
-                        "Tap cancelled at ${timeFormatter.format(Date())}: $description"
-                    )
-                    onFailed()
-                }
-            },
-            handler
+        val point = randomizedPointInside(bounds)
+        val preTapDelay = randomDelayMs(
+            BUTTON_PRE_TAP_DELAY_MIN_MS,
+            BUTTON_PRE_TAP_DELAY_MAX_MS
         )
+        val tapDuration = randomDelayMs(TAP_DURATION_MIN_MS, TAP_DURATION_MAX_MS)
+        val description =
+            "$label at ${point.x.toInt()},${point.y.toInt()} bounds=${bounds.toShortString()} delay=${preTapDelay}ms"
+        BotRuntime.setLastGesture(this, "Tap queued: $description")
 
-        if (!dispatched) {
-            BotRuntime.setLastGesture(this, "Tap rejected: $description")
-            onFailed()
-        }
+        handler.postDelayed({
+            if (!BotRuntime.isRunning(this)) return@postDelayed
+
+            val path = Path().apply { moveTo(point.x, point.y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(
+                    GestureDescription.StrokeDescription(
+                        path,
+                        0L,
+                        tapDuration
+                    )
+                )
+                .build()
+
+            val dispatched = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        BotRuntime.setLastGesture(
+                            this@SlotBotAccessibilityService,
+                            "Tap completed at ${timeFormatter.format(Date())}: $description"
+                        )
+                        onCompleted()
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        BotRuntime.setLastGesture(
+                            this@SlotBotAccessibilityService,
+                            "Tap cancelled at ${timeFormatter.format(Date())}: $description"
+                        )
+                        onFailed()
+                    }
+                },
+                handler
+            )
+
+            if (!dispatched) {
+                BotRuntime.setLastGesture(this, "Tap rejected: $description")
+                onFailed()
+            }
+        }, preTapDelay)
+    }
+
+    private fun randomizedPointInside(bounds: Rect): ScreenPoint {
+        val centerX = bounds.exactCenterX()
+        val centerY = bounds.exactCenterY()
+        val edgeMarginX = minOf(dp(TAP_EDGE_MARGIN_DP), bounds.width() / 4)
+        val edgeMarginY = minOf(dp(TAP_EDGE_MARGIN_DP), bounds.height() / 4)
+
+        val minX = bounds.left + edgeMarginX
+        val maxX = bounds.right - edgeMarginX
+        val minY = bounds.top + edgeMarginY
+        val maxY = bounds.bottom - edgeMarginY
+
+        val availableX = ((maxX - minX) / 2).coerceAtLeast(0)
+        val availableY = ((maxY - minY) / 2).coerceAtLeast(0)
+        val jitterX = minOf(dp(BUTTON_TAP_JITTER_X_DP), availableX)
+        val jitterY = minOf(dp(BUTTON_TAP_JITTER_Y_DP), availableY)
+
+        val x = (centerX + randomSignedOffset(jitterX))
+            .coerceIn(minX.toFloat(), maxX.toFloat())
+        val y = (centerY + randomSignedOffset(jitterY))
+            .coerceIn(minY.toFloat(), maxY.toFloat())
+
+        return ScreenPoint(x, y, "button bounds")
+    }
+
+    private fun randomizedPointAround(
+        x: Float,
+        y: Float,
+        maxXJitterDp: Int,
+        maxYJitterDp: Int
+    ): ScreenPoint {
+        val metrics = resources.displayMetrics
+        val maxX = (metrics.widthPixels - 1).coerceAtLeast(1).toFloat()
+        val maxY = (metrics.heightPixels - 1).coerceAtLeast(1).toFloat()
+
+        return ScreenPoint(
+            x = (x + randomSignedOffset(dp(maxXJitterDp))).coerceIn(1f, maxX),
+            y = (y + randomSignedOffset(dp(maxYJitterDp))).coerceIn(1f, maxY),
+            source = "bounded jitter"
+        )
+    }
+
+    private fun randomSignedOffset(maxAbsolutePx: Int): Float {
+        if (maxAbsolutePx <= 0) return 0f
+        return Random.nextInt(-maxAbsolutePx, maxAbsolutePx + 1).toFloat()
+    }
+
+    private fun randomDelayMs(minInclusive: Long, maxInclusive: Long): Long {
+        if (maxInclusive <= minInclusive) return minInclusive
+        return Random.nextLong(minInclusive, maxInclusive + 1L)
     }
 
     private fun supportedRoots(): List<AccessibilityNodeInfo> {
@@ -992,16 +1057,30 @@ class SlotBotAccessibilityService : AccessibilityService() {
         private const val REFRESH_SETTLE_MS = 1_400L
         private const val REFRESH_GESTURE_DURATION_MS = 850L
 
-        private const val TAP_DURATION_MS = 120L
         private const val CONFIRMATION_POLL_DELAY_MS = 350L
         private const val MAX_CONFIRMATION_POLLS = 12
         private const val FAILED_BOOK_COOLDOWN_MS = 1_000L
         private const val POST_CONFIRM_SETTLE_MS = 1_000L
 
-        private const val DAY_SWITCH_SETTLE_MS = 500L
-        private const val CALENDAR_CONTINUE_DELAY_MS = 350L
+        private const val DAY_SWITCH_SETTLE_MIN_MS = 430L
+        private const val DAY_SWITCH_SETTLE_MAX_MS = 620L
         private const val CALENDAR_RETRY_MS = 700L
         private const val MAX_CALENDAR_TAP_RETRIES = 2
+
+        private const val CALENDAR_PRE_TAP_DELAY_MIN_MS = 45L
+        private const val CALENDAR_PRE_TAP_DELAY_MAX_MS = 125L
+        private const val CALENDAR_CONTINUE_DELAY_MIN_MS = 300L
+        private const val CALENDAR_CONTINUE_DELAY_MAX_MS = 460L
+        private const val BUTTON_PRE_TAP_DELAY_MIN_MS = 25L
+        private const val BUTTON_PRE_TAP_DELAY_MAX_MS = 85L
+        private const val TAP_DURATION_MIN_MS = 90L
+        private const val TAP_DURATION_MAX_MS = 145L
+
+        private const val CALENDAR_TAP_JITTER_X_DP = 5
+        private const val CALENDAR_TAP_JITTER_Y_DP = 4
+        private const val BUTTON_TAP_JITTER_X_DP = 6
+        private const val BUTTON_TAP_JITTER_Y_DP = 5
+        private const val TAP_EDGE_MARGIN_DP = 5
 
         private const val CALENDAR_FIRST_DAY_X_RATIO = 0.094f
         private const val CALENDAR_LAST_DAY_X_RATIO = 0.906f
