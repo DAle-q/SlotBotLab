@@ -22,12 +22,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -43,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,6 +79,10 @@ private fun BotControlScreen() {
 
     var dayTargets by remember { mutableStateOf(BotRuntime.dayTargets(context)) }
     var activeTargetDay by remember { mutableIntStateOf(BotRuntime.activeTargetDay(context)) }
+    var maxRefreshSeconds by remember {
+        mutableIntStateOf(BotRuntime.maxRefreshIntervalSeconds(context))
+    }
+    var maxRefreshInput by remember { mutableStateOf(maxRefreshSeconds.toString()) }
     var running by remember { mutableStateOf(BotRuntime.isRunning(context)) }
     var accessibilityEnabled by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var overlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
@@ -96,6 +103,7 @@ private fun BotControlScreen() {
         while (true) {
             dayTargets = BotRuntime.dayTargets(context)
             activeTargetDay = BotRuntime.activeTargetDay(context)
+            maxRefreshSeconds = BotRuntime.maxRefreshIntervalSeconds(context)
             running = BotRuntime.isRunning(context)
             accessibilityEnabled = isAccessibilityServiceEnabled(context)
             overlayPermission = Settings.canDrawOverlays(context)
@@ -117,6 +125,11 @@ private fun BotControlScreen() {
 
     val totalTargets = dayTargets.sum()
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val expectedCyclesPerHour = remember(maxRefreshSeconds) {
+        val averageDelaySeconds =
+            (BotRuntime.MIN_REFRESH_INTERVAL_SECONDS + maxRefreshSeconds) / 2.0
+        String.format(Locale.US, "%.1f", 3_600.0 / averageDelaySeconds)
+    }
     val nextRefreshText = when {
         !running -> "PAUSED"
         nextRefreshAt <= 0L -> "SCANNING"
@@ -148,6 +161,24 @@ private fun BotControlScreen() {
                 onDecrement = { dayIndex ->
                     BotRuntime.decrementDayTarget(context, dayIndex)
                     dayTargets = BotRuntime.dayTargets(context)
+                }
+            )
+
+            RefreshIntervalEditor(
+                currentSeconds = maxRefreshSeconds,
+                value = maxRefreshInput,
+                onValueChange = { newValue ->
+                    if (
+                        newValue.length <= 4 &&
+                        newValue.all { character -> character.isDigit() }
+                    ) {
+                        maxRefreshInput = newValue
+                    }
+                },
+                onSave = { seconds ->
+                    val saved = BotRuntime.setMaxRefreshIntervalSeconds(context, seconds)
+                    maxRefreshSeconds = saved
+                    maxRefreshInput = saved.toString()
                 }
             )
 
@@ -232,8 +263,16 @@ private fun BotControlScreen() {
                     Text("Book clicks: $bookClicks", color = Color.White, fontSize = 17.sp)
                     Text("Book session clicks: $confirmationClicks", color = Color.White, fontSize = 17.sp)
                     Text("All successful clicks: $clickAttempts", color = Color.White, fontSize = 17.sp)
-                    Text("Refresh range: 01:00-10:00", color = Color.White, fontSize = 17.sp)
-                    Text("Expected average: about 10.9 cycles/hour", color = ControlMuted, fontSize = 15.sp)
+                    Text(
+                        "Refresh range: ${BotRuntime.MIN_REFRESH_INTERVAL_SECONDS}-$maxRefreshSeconds seconds",
+                        color = Color.White,
+                        fontSize = 17.sp
+                    )
+                    Text(
+                        "Expected average: about $expectedCyclesPerHour cycles/hour",
+                        color = ControlMuted,
+                        fontSize = 15.sp
+                    )
                 }
             }
 
@@ -375,6 +414,73 @@ private fun BotControlScreen() {
 }
 
 @Composable
+private fun RefreshIntervalEditor(
+    currentSeconds: Int,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSave: (Int) -> Unit
+) {
+    val parsedValue = value.toIntOrNull()
+    val validValue = parsedValue != null && parsedValue in
+        BotRuntime.MIN_REFRESH_INTERVAL_SECONDS..BotRuntime.MAX_ALLOWED_REFRESH_INTERVAL_SECONDS
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = ControlCard),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "MAX REFRESH WAIT",
+                color = ControlMuted,
+                fontWeight = FontWeight.Bold
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    label = { Text("Seconds") },
+                    supportingText = {
+                        Text(
+                            if (validValue) {
+                                "Random range: ${BotRuntime.MIN_REFRESH_INTERVAL_SECONDS}-$parsedValue s"
+                            } else {
+                                "Allowed: ${BotRuntime.MIN_REFRESH_INTERVAL_SECONDS}-${BotRuntime.MAX_ALLOWED_REFRESH_INTERVAL_SECONDS}"
+                            }
+                        )
+                    },
+                    isError = value.isNotEmpty() && !validValue,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+
+                Button(
+                    onClick = { parsedValue?.let(onSave) },
+                    enabled = validValue && parsedValue != currentSeconds
+                ) {
+                    Text("SAVE")
+                }
+            }
+
+            Text(
+                text = "Current: $currentSeconds seconds. Changes apply to the next scheduled wait.",
+                color = ControlMuted,
+                fontSize = 13.sp
+            )
+        }
+    }
+}
+
+@Composable
 private fun DayTargetPlanner(
     targets: List<Int>,
     activeDay: Int,
@@ -402,7 +508,7 @@ private fun DayTargetPlanner(
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 BotRuntime.dayLabels.forEachIndexed { index, label ->
-                    val value = targets.getOrElse(index) { 0 }
+                    val valueForDay = targets.getOrElse(index) { 0 }
                     val active = index == activeDay
 
                     Column(
@@ -420,20 +526,20 @@ private fun DayTargetPlanner(
 
                         CounterButton(
                             text = "+",
-                            enabled = value < 20,
+                            enabled = valueForDay < 20,
                             onClick = { onIncrement(index) }
                         )
 
                         Text(
-                            text = value.toString(),
-                            color = if (value > 0) Color.White else ControlMuted,
+                            text = valueForDay.toString(),
+                            color = if (valueForDay > 0) Color.White else ControlMuted,
                             fontSize = 21.sp,
                             fontWeight = FontWeight.Bold
                         )
 
                         CounterButton(
                             text = "−",
-                            enabled = value > 0,
+                            enabled = valueForDay > 0,
                             onClick = { onDecrement(index) }
                         )
                     }
