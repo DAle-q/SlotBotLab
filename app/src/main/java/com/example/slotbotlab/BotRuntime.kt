@@ -3,6 +3,7 @@ package com.example.slotbotlab
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.random.Random
 
 
 data class CatchLogEntry(
@@ -14,6 +15,7 @@ object BotRuntime {
     private const val PREFS = "slot_bot_runtime"
     private const val KEY_RUNNING = "running"
     private const val KEY_INTERVAL_MS = "interval_ms"
+    private const val KEY_MAX_REFRESH_INTERVAL_SECONDS = "max_refresh_interval_seconds"
     private const val KEY_DETECTIONS = "detections"
     private const val KEY_CLICK_ATTEMPTS = "click_attempts"
     private const val KEY_BOOK_CLICKS = "book_clicks"
@@ -32,6 +34,10 @@ object BotRuntime {
     private const val MAX_CATCH_LOGS = 50
     private const val DUPLICATE_CATCH_WINDOW_MS = 30_000L
     private const val MAX_DAY_TARGET = 20
+    private const val DEFAULT_MAX_REFRESH_INTERVAL_SECONDS = 600
+
+    const val MIN_REFRESH_INTERVAL_SECONDS = 60
+    const val MAX_ALLOWED_REFRESH_INTERVAL_SECONDS = 1200
 
     val dayLabels: List<String> = listOf("M", "Tu", "W", "Th", "F", "Sa", "Su")
 
@@ -64,6 +70,25 @@ object BotRuntime {
         prefs(context).edit()
             .putLong(KEY_INTERVAL_MS, intervalMs.coerceIn(2_000L, 60_000L))
             .apply()
+    }
+
+    fun maxRefreshIntervalSeconds(context: Context): Int =
+        prefs(context)
+            .getInt(KEY_MAX_REFRESH_INTERVAL_SECONDS, DEFAULT_MAX_REFRESH_INTERVAL_SECONDS)
+            .coerceIn(
+                MIN_REFRESH_INTERVAL_SECONDS,
+                MAX_ALLOWED_REFRESH_INTERVAL_SECONDS
+            )
+
+    fun setMaxRefreshIntervalSeconds(context: Context, seconds: Int): Int {
+        val safeValue = seconds.coerceIn(
+            MIN_REFRESH_INTERVAL_SECONDS,
+            MAX_ALLOWED_REFRESH_INTERVAL_SECONDS
+        )
+        prefs(context).edit()
+            .putInt(KEY_MAX_REFRESH_INTERVAL_SECONDS, safeValue)
+            .apply()
+        return safeValue
     }
 
     fun dayTargets(context: Context): List<Int> =
@@ -163,7 +188,18 @@ object BotRuntime {
         prefs(context).getLong(KEY_NEXT_REFRESH_AT, 0L)
 
     fun setNextRefreshAt(context: Context, epochMillis: Long) {
-        prefs(context).edit().putLong(KEY_NEXT_REFRESH_AT, epochMillis).apply()
+        val now = System.currentTimeMillis()
+        val storedEpochMillis = if (epochMillis > now) {
+            val minDelayMs = MIN_REFRESH_INTERVAL_SECONDS * 1_000L
+            val maxDelayMs = maxRefreshIntervalSeconds(context) * 1_000L
+            now + Random.nextLong(minDelayMs, maxDelayMs + 1L)
+        } else {
+            epochMillis
+        }
+
+        prefs(context).edit()
+            .putLong(KEY_NEXT_REFRESH_AT, storedEpochMillis)
+            .apply()
     }
 
     fun activePackage(context: Context): String =
